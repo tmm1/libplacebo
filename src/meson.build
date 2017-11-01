@@ -27,6 +27,9 @@ build_deps = [
   cc.find_library('m', required: false),
 ]
 
+test_deps = [
+]
+
 # Source files
 sources = [
   'colorspace.c',
@@ -74,6 +77,26 @@ components = [
     'vulkan.c'
   ]
 ]
+
+# OpenGL stuff. Since the test framework needs to create a GL context,
+# we have to do this in a platform dependent way.
+
+epoxy = dependency('epoxy', version: '>=1.4.0', required: false)
+x11 = dependency('x11', required: false)
+
+gl_tests = []
+if epoxy.found() and x11.found()
+  gl_tests  += 'opengl_x11.c'
+  test_deps += [epoxy, x11]
+endif
+
+components += [[
+  'opengl', epoxy,
+  [ 'opengl/context.c',
+    'opengl/ra_gl.c',
+  ],
+  gl_tests
+]]
 
 # OS-dependent files and feature checks
 has_useloc = cc.has_header_symbol(
@@ -157,11 +180,12 @@ pkg.generate(
 
 # Tests
 
-tdeps = [ declare_dependency(link_with: lib) ]
+test_deps += [ declare_dependency(link_with: lib) ]
 
 if get_option('tests')
   foreach t : tests
-    e = executable('test.' + t, 'tests/' + t, dependencies: build_deps + tdeps)
-    test(t, e)
+    test(t, executable('test.c' + t, 'tests/' + t,
+      dependencies: build_deps + test_deps
+    ))
   endforeach
 endif

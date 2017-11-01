@@ -5,6 +5,9 @@ option('vulkan', type: 'combo', choices: ['auto', 'true', 'false'],
 option('shaderc', type: 'combo', choices: ['auto', 'true', 'false'],
        description: 'libshaderc SPIR-V compiler')
 
+option('opengl', type: 'combo', choices: ['auto', 'true', 'false'],
+       description: 'OpenGL-based renderer')
+
 # Miscellaneous
 option('tests', type: 'boolean', value: false,
        description: 'Enable building the test cases')
