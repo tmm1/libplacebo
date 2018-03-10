@@ -1098,10 +1098,61 @@ static bool vk_buf_poll(const struct pl_gpu *gpu, const struct pl_buf *buf,
     return buf_vk->refcount > 1;
 }
 
+static bool tex_upload_cb(const struct pl_gpu *gpu,
+                          const struct pl_tex_transfer_params *params,
+                          void *priv)
+{
+    struct pl_vk *p = gpu->priv;
+    const struct pl_tex *tex = params->tex;
+    struct pl_tex_vk *tex_vk = tex->priv;
+    const struct pl_buf *buf = params->buf;
+    struct pl_buf_vk *buf_vk = buf->priv;
+    size_t size = pl_tex_transfer_size(params);
+
+    const struct pl_buf *tbuf;
+    tbuf = pl_buf_pool_get(gpu, &tex_vk->texel_write, &(struct pl_buf_params) {
+        .type = PL_BUF_TEXEL_UNIFORM,
+        .size = size,
+        .format = tex_vk->texel_fmt,
+    });
+
+    if (!tbuf) {
+        PL_ERR(gpu, "Failed creating texel buffer for emulated tex upload!");
+        return false;
+    }
+
+    // Note: Make sure to run vk_require_cmd *after* pl_buf_pool_get, since the
+    // former could imply polling which could imply submitting the command we
+    // just required!
+    struct vk_cmd *cmd = vk_require_cmd(gpu, tex_vk->transfer_queue);
+    if (!cmd)
+        return false;
+
+    struct pl_buf_vk *tbuf_vk = tbuf->priv;
+    VkBufferCopy region = {
+        .srcOffset = buf_vk->slice.mem.offset + params->buf_offset,
+        .dstOffset = tbuf_vk->slice.mem.offset,
+        .size = size,
+    };
+
+    buf_barrier(gpu, cmd, buf, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT, region.srcOffset, size, false);
+
+    buf_barrier(gpu, cmd, tbuf, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT, region.dstOffset, size, false);
+
+    vkCmdCopyBuffer(cmd->buf, buf_vk->slice.buf, tbuf_vk->slice.buf,
+                    1, &region);
+
+    struct pl_tex_transfer_params fixed = *params;
+    fixed.buf = tbuf;
+    fixed.buf_offset = 0;
+    return pl_tex_upload_texel(gpu, p->dp, &fixed);
+}
+
 static bool vk_tex_upload(const struct pl_gpu *gpu,
                           const struct pl_tex_transfer_params *params)
 {
-    struct pl_vk *p = gpu->priv;
     const struct pl_tex *tex = params->tex;
     struct pl_tex_vk *tex_vk = tex->priv;
 
@@ -1115,47 +1166,8 @@ static bool vk_tex_upload(const struct pl_gpu *gpu,
     size_t size = pl_tex_transfer_size(params);
 
     if (tex->params.format->emulated) {
-        // Copy the buffer into a texel buffer for software texture blit purposes
-        const struct pl_buf *tbuf;
-        tbuf = pl_buf_pool_get(gpu, &tex_vk->texel_write, &(struct pl_buf_params) {
-            .type = PL_BUF_TEXEL_UNIFORM,
-            .size = size,
-            .format = tex_vk->texel_fmt,
-        });
-
-        if (!tbuf) {
-            PL_ERR(gpu, "Failed creating texel buffer for emulated tex upload!");
+        if (!pl_tex_transfer_texel_foreach(gpu, params, tex_upload_cb, NULL))
             goto error;
-        }
-
-        // Note: Make sure to run vk_require_cmd *after* pl_buf_pool_get, since
-        // the former could imply polling which could imply submitting the
-        // command we just required!
-        struct vk_cmd *cmd = vk_require_cmd(gpu, tex_vk->transfer_queue);
-        if (!cmd)
-            goto error;
-
-        struct pl_buf_vk *tbuf_vk = tbuf->priv;
-        VkBufferCopy region = {
-            .srcOffset = buf_vk->slice.mem.offset + params->buf_offset,
-            .dstOffset = tbuf_vk->slice.mem.offset,
-            .size = size,
-        };
-
-        buf_barrier(gpu, cmd, buf, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    VK_ACCESS_TRANSFER_READ_BIT, region.srcOffset, size, false);
-
-        buf_barrier(gpu, cmd, tbuf, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    VK_ACCESS_TRANSFER_WRITE_BIT, region.dstOffset, size, false);
-
-        vkCmdCopyBuffer(cmd->buf, buf_vk->slice.buf, tbuf_vk->slice.buf,
-                        1, &region);
-
-        struct pl_tex_transfer_params fixed = *params;
-        fixed.buf = tbuf;
-        fixed.buf_offset = 0;
-        return pl_tex_upload_texel(gpu, p->dp, &fixed);
-
     } else {
         struct vk_cmd *cmd = vk_require_cmd(gpu, tex_vk->transfer_queue);
         if (!cmd)

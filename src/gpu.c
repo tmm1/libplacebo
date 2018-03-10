@@ -1217,6 +1217,79 @@ bool pl_tex_download_pbo(const struct pl_gpu *gpu, struct pl_buf_pool *pbo,
     return pl_buf_read(gpu, buf, 0, params->ptr, bufparams.size);
 }
 
+bool pl_tex_transfer_texel_foreach(const struct pl_gpu *gpu,
+                                   const struct pl_tex_transfer_params *params,
+                                   tex_iter_fn fun, void *priv)
+{
+    // Maximum size (in bytes) that we can dimension a texel size buffer to
+    // fit this image format
+    const struct pl_fmt *fmt = params->tex->params.format;
+    uint64_t max_texels = gpu->limits.max_buffer_texels;
+    size_t max_size = max_texels * fmt->texel_size / fmt->num_components;
+    int comps = fmt->num_components;
+
+    // Determine the optimal slice size by leveraging the tex transfer helpers
+    struct pl_tex_transfer_params new = *params;
+    if (pl_tex_transfer_size(&new) > max_size) {
+        int slice = max_texels / (params->stride_h * params->stride_w * comps);
+        new.rc.z1 = new.rc.z0 + PL_MAX(1, slice);
+    }
+
+    if (pl_tex_transfer_size(&new) > max_size) {
+        int slice = max_texels / (params->stride_w * comps);
+        new.rc.y1 = new.rc.y0 + PL_MAX(1, slice);
+    }
+
+    if (pl_tex_transfer_size(&new) > max_size) {
+        new.rc.x1 = new.rc.x0 + PL_MAX(1, max_texels / comps);
+    }
+
+    if (pl_tex_transfer_size(&new) > max_size) {
+        PL_ERR(gpu, "Texel buffers not large enough to contain a single pixel?!");
+        return false;
+    }
+
+    int sw = pl_rect_w(new.rc), sh = pl_rect_h(new.rc), sd = pl_rect_d(new.rc);
+    const struct pl_rect3d *rc = &params->rc;
+    size_t orig_offset = params->buf_offset;
+    void *orig_ptr = params->ptr;
+
+    for (int z = rc->z0; z < rc->z1; z += sd) {
+        for (int y = rc->y0; y < rc->y1; y += sh) {
+            for (int x = rc->x0; x < rc->x1; x += sw) {
+                new.rc = (struct pl_rect3d) {
+                    .x0 = x,
+                    .y0 = y,
+                    .z0 = z,
+                    .x1 = PL_MIN(rc->x1, x + sw),
+                    .y1 = PL_MIN(rc->y1, y + sh),
+                    .z1 = PL_MIN(rc->z1, z + sd),
+                };
+
+                // Adjust the buffer/pointer deltas for this slice
+                size_t offset = (((z - rc->z0) * params->stride_h +
+                                  (y - rc->y0) * params->stride_w) +
+                                  (x - rc->x0)) * fmt->texel_size;
+
+                new.buf_offset = orig_offset + offset;
+                new.ptr = (void *) ((uintptr_t) orig_ptr + (ptrdiff_t) offset);
+
+                PL_TRACE(gpu, "Uploading %dx%dx%d texel buffer slice: "
+                         "(%d,%d,%d) - (%d,%d,%d), offset +%zu",
+                         pl_rect_w(new.rc), pl_rect_h(new.rc), pl_rect_d(new.rc),
+                         new.rc.x0, new.rc.y0, new.rc.z0,
+                         new.rc.x1, new.rc.y1, new.rc.z1,
+                         offset);
+
+                if (!fun(gpu, &new, priv))
+                    return false;
+            }
+        }
+    }
+
+    return true;
+}
+
 bool pl_tex_upload_texel(const struct pl_gpu *gpu, struct pl_dispatch *dp,
                          const struct pl_tex_transfer_params *params)
 {
@@ -1251,10 +1324,9 @@ bool pl_tex_upload_texel(const struct pl_gpu *gpu, struct pl_dispatch *dp,
         .object = params->tex,
     });
 
-    GLSL("vec4 color = vec4(0.0);                                       \n"
-         "ivec3 pos = ivec3(gl_GlobalInvocationID) + ivec3(%d, %d, %d); \n"
-         "int base = ((pos.z * %d + pos.y) * %d + pos.x) * %d;          \n",
-         params->rc.x0, params->rc.y0, params->rc.z0,
+    GLSL("vec4 color = vec4(0.0);                              \n"
+         "ivec3 pos = ivec3(gl_GlobalInvocationID);            \n"
+         "int base = ((pos.z * %d + pos.y) * %d + pos.x) * %d; \n",
          params->stride_h, params->stride_w, fmt->num_components);
 
     for (int i = 0; i < fmt->num_components; i++)
@@ -1275,7 +1347,19 @@ bool pl_tex_upload_texel(const struct pl_gpu *gpu, struct pl_dispatch *dp,
         [3] = "ivec3",
     };
 
-    GLSL("imageStore(%s, %s(pos), color);\n", img, coord_types[dims]);
+    ident_t base = sh_var(sh, (struct pl_shader_var) {
+        .var = {
+            .name = "img_base",
+            .type = PL_VAR_SINT,
+            .dim_v = dims,
+            .dim_m = 1,
+            .dim_a = 1,
+        },
+        .data = &(int[3]){ params->rc.x0, params->rc.y0, params->rc.z0 },
+        .dynamic = true,
+    });
+
+    GLSL("imageStore(%s, %s(pos) + %s, color);\n", img, coord_types[dims], base);
     int groups[3] = { groups_x, pl_rect_h(params->rc), pl_rect_d(params->rc) };
     return pl_dispatch_compute(dp, &sh, groups);
 }

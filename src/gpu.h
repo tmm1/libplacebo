@@ -126,6 +126,19 @@ bool pl_tex_upload_pbo(const struct pl_gpu *gpu, struct pl_buf_pool *pbo,
 bool pl_tex_download_pbo(const struct pl_gpu *gpu, struct pl_buf_pool *pbo,
                          const struct pl_tex_transfer_params *params);
 
+typedef bool (*tex_iter_fn)(const struct pl_gpu *gpu,
+                            const struct pl_tex_transfer_params *params,
+                            void *priv);
+
+// Helper for iterating through a texture transfer in slices, each dimensioned
+// appropriately to upload the next slice while remaining small enough to
+// fit inside a texel buffer. For each slice, the callback is called on that
+// slice's rectangle. Returns the conjunction (logical AND) of each iteration,
+// with short circuiting in the case of failure.
+bool pl_tex_transfer_texel_foreach(const struct pl_gpu *gpu,
+                                   const struct pl_tex_transfer_params *params,
+                                   tex_iter_fn fun, void *priv);
+
 // This requires that params.buf has been set and is of type PL_BUF_TEXEL_*
 bool pl_tex_upload_texel(const struct pl_gpu *gpu, struct pl_dispatch *dp,
                          const struct pl_tex_transfer_params *params);
