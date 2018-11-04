@@ -132,6 +132,15 @@ struct pl_render_params {
     // already disabled if the overlay texture does not need to be scaled.
     bool disable_overlay_sampling;
 
+    // Normally, when the size of the `pl_render_target` used with
+    // `pl_render_image_mix` changes, the internal cache of mixed frames must
+    // be discarded in order to re-render all required frames at the new output
+    // size. Setting this option to `true` will skip the cache invalidation and
+    // instead re-use the existing frames (with bilinear scaling to the new
+    // size), which comes at a quality loss shortly after a resize, but should
+    // make it much more smooth.
+    bool preserve_mixing_cache;
+
     // --- Performance tuning / debugging options
     // These may affect performance or may make debugging problems easier,
     // but shouldn't have any effect on the quality.
@@ -381,8 +390,6 @@ bool pl_render_image(struct pl_renderer *rr, const struct pl_image *image,
                      const struct pl_render_target *target,
                      const struct pl_render_params *params);
 
-/* TODO
-
 // Represents a mixture of input images, distributed temporally.
 //
 // NOTE: Images must be sorted by timestamp, i.e. `distances` must be
@@ -394,9 +401,10 @@ struct pl_image_mix {
     int num_images;
 
     // A list of the images themselves. The images can have different
-    // colorspaces, configurations of planes, or even sizes. Note: when using
-    // frame mixing, it's absolutely critical that all of the images have
-    // a unique value of `pl_image.signature`.
+    // colorspaces, configurations of planes, or even sizes.
+    //
+    // Note: when using frame mixing, it's absolutely critical that all of the
+    // images have a unique value of `pl_image.signature`.
     const struct pl_image *images;
 
     // A list of relative distance vectors for each image, respectively.
@@ -435,9 +443,9 @@ struct pl_image_mix {
     // algorithm will (only) need to consult all of the frames that have a
     // distance within the interval [-radius, radius]. As such, the user should
     // include all such frames in `images`, but may prune or omit frames that
-    // lie outside it.
+    // lie outside it. (As long as `images` still has at least one entry)
     //
-    // The built-in frame mixing (`pl_render_params.frame_mixing == NULL`) has
+    // The built-in frame mixing (`pl_render_params.frame_mixer == NULL`) has
     // a canonical radius equal to `vsync_duration/2`.
 };
 
@@ -455,6 +463,5 @@ struct pl_image_mix {
 bool pl_render_image_mix(struct pl_renderer *rr, const struct pl_image_mix *mix,
                          const struct pl_render_target *target,
                          const struct pl_render_params *params);
-*/
 
 #endif // LIBPLACEBO_RENDERER_H_

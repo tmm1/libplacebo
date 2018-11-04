@@ -432,6 +432,43 @@ static void pl_render_tests(const struct pl_gpu *gpu)
         printf("\n");
     }
 
+    // Attempt frame mixing
+    struct pl_image_mix mix = {
+        .num_images = 2,
+        .images = (struct pl_image[]) {
+            {
+                .signature      = 0x0,
+                .num_planes     = 1,
+                .planes         = { img5x5 },
+                .repr = {
+                    .sys        = PL_COLOR_SYSTEM_BT_709,
+                    .levels     = PL_COLOR_LEVELS_PC,
+                },
+                .color          = pl_color_space_bt709,
+                .width          = width,
+                .height         = height,
+                .src_rect       = {-1.0, 0.0, width - 1.0, height},
+            }, {
+                .signature      = 0x1,
+                .num_planes     = 1,
+                .planes         = { img5x5 },
+                .repr = {
+                    .sys        = PL_COLOR_SYSTEM_BT_709,
+                    .levels     = PL_COLOR_LEVELS_PC,
+                },
+                .color          = pl_color_space_bt709,
+                .width          = width,
+                .height         = height,
+                .src_rect       = {-1.0, 0.0, width - 1.0, height},
+            },
+        },
+        .distances = (float[]) { -0.3, 0.7 },
+        .vsync_duration = 2.0, // for testing
+    };
+
+    pl_tex_clear(gpu, fbo, (float[4]){0});
+    REQUIRE(pl_render_image_mix(rr, &mix, &target, NULL));
+
 error:
     free(fbo_data);
     pl_renderer_destroy(&rr);

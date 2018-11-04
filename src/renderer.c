@@ -50,6 +50,11 @@ enum {
     PLANE_CIEZ = PLANE_B,
 };
 
+struct cached_frame {
+    uint64_t signature;
+    const struct pl_tex *tex;
+};
+
 struct sampler {
     struct pl_shader_obj *upscaler_state;
     struct pl_shader_obj *downscaler_state;
@@ -74,6 +79,7 @@ struct pl_renderer {
     bool disable_blending;   // disable blending for the target/fbofmt
     bool disable_overlay;    // disable rendering overlays
     bool disable_3dlut;      // disable usage of a 3DLUT
+    bool disable_mixing;     // disable frame mixing
 
     // Shader resource objects and intermediate textures (FBOs)
     struct pl_shader_obj *peak_detect_state;
@@ -85,6 +91,10 @@ struct pl_renderer {
     struct sampler samplers[SCALER_COUNT];
     struct sampler *osd_samplers;
     int num_osd_samplers;
+
+    // Frame cache (for frame mixing / interpolation)
+    struct cached_frame *frames;
+    int num_frames;
 };
 
 static void find_fbo_format(struct pl_renderer *rr)
@@ -176,6 +186,8 @@ void pl_renderer_destroy(struct pl_renderer **p_rr)
     for (int i = 0; i < PL_ARRAY_SIZE(rr->deband_fbos); i++)
         pl_tex_destroy(rr->gpu, &rr->deband_fbos[i]);
     pl_tex_destroy(rr->gpu, &rr->output_fbo);
+    for (int i = 0; i < rr->num_frames; i++)
+        pl_tex_destroy(rr->gpu, &rr->frames[i].tex);
 
     // Free all shader resource objects
     pl_shader_obj_destroy(&rr->peak_detect_state);
@@ -839,7 +851,8 @@ static bool pass_output_target(struct pl_renderer *rr, struct pass_state *pass,
     struct pl_shader *sh = pass->cur_img.sh;
 
     // Color management
-    bool use_3dlut = image->profile.data || target->profile.data ||
+    bool use_3dlut = (image && image->profile.data) ||
+                     target->profile.data ||
                      params->force_3dlut;
     if (rr->disable_3dlut)
         use_3dlut = false;
@@ -849,7 +862,7 @@ static bool pass_output_target(struct pl_renderer *rr, struct pass_state *pass,
     if (use_3dlut) {
         struct pl_3dlut_profile src = {
             .color = pass->cur_img.color,
-            .profile = image->profile,
+            .profile = image ? image->profile : (struct pl_icc_profile) {0},
         };
 
         struct pl_3dlut_profile dst = {
@@ -1024,6 +1037,168 @@ error:
     pl_dispatch_abort(rr->dp, &pass.cur_img.sh);
     PL_ERR(rr, "Failed rendering image!");
     return false;
+}
+
+bool pl_render_image_mix(struct pl_renderer *rr, const struct pl_image_mix *mix,
+                         const struct pl_render_target *ptarget,
+                         const struct pl_render_params *params)
+{
+    params = PL_DEF(params, &pl_render_default_params);
+
+    struct pl_render_target target = *ptarget;
+    pl_color_space_infer(&target.color);
+
+    if (rr->disable_mixing || !rr->fbofmt)
+        goto fallback;
+
+    // Garbage collect the cache by evicting all frames from the frame cache
+    // that are not within the critical radius
+    float radius = params->frame_mixer ? params->frame_mixer->kernel->radius
+                                       : mix->vsync_duration / 2;
+
+    for (int pos = 0; pos < rr->num_frames; ) {
+        bool evict = true;
+
+        for (int i = 0; i < mix->num_images; i++) {
+            // Find the matching frame, if any
+            if (rr->frames[pos].signature != mix->images[i].signature)
+                continue;
+
+            // Evict the frame if the distance is outside what we need
+            evict = fabs(mix->distances[i]) > radius;
+            break;
+        }
+
+        if (evict) {
+            PL_TRACE(rr, "Evicting frame %d with signature %lu from cache",
+                     pos, rr->frames[pos].signature);
+            pl_tex_destroy(rr->gpu, &rr->frames[pos].tex); // FIXME: reuse
+            TARRAY_REMOVE_AT(rr->frames, rr->num_frames, pos);
+            continue;
+        } else {
+            PL_TRACE(rr, "Preserving frame %d with signature %lu in cache",
+                     pos, rr->frames[pos].signature);
+            pos++; // Move on to next image
+        }
+    }
+
+    // We choose a unified "nominal" color space for all of the intermediate
+    // render products, which does not depend on the representation of any one
+    // image. This way we avoid having to invalidate the frame cache due to
+    // changes in the source or target characteristics.
+    static const struct pl_render_target target_skel = {
+        .repr = {
+            .sys = PL_COLOR_SYSTEM_RGB,
+            .levels = PL_COLOR_LEVELS_PC,
+            .alpha = PL_ALPHA_PREMULTIPLIED,
+        },
+        .color = {
+            .primaries = PL_COLOR_PRIM_PRO_PHOTO,
+            .transfer = PL_COLOR_TRC_LINEAR,
+            .light = PL_COLOR_LIGHT_DISPLAY,
+        },
+    };
+
+    int out_w = abs(pl_rect_w(target.dst_rect)),
+        out_h = abs(pl_rect_h(target.dst_rect));
+
+    out_w = PL_DEF(out_w, target.fbo->params.w);
+    out_h = PL_DEF(out_h, target.fbo->params.h);
+
+    struct pl_shader *sh = pl_dispatch_begin(rr->dp);
+    sh->res.output = PL_SHADER_SIG_COLOR;
+    sh->output_w = out_w;
+    sh->output_h = out_h;
+
+    GLSL("vec4 color = vec4(0.0); \n");
+
+    // Mix together all of the frames that we *do* need
+    for (int i = 0; i < mix->num_images; i++) {
+        if (fabs(mix->distances[i]) > radius)
+            continue;
+
+        struct cached_frame *f = NULL;
+        for (int j = 0; j < rr->num_frames; j++) {
+            if (mix->images[i].signature == rr->frames[j].signature) {
+                f = &rr->frames[j];
+                break;
+            }
+        }
+
+        if (!f) {
+            // Signature does not exist in the cache at all yet,
+            // so grow the cache by this entry.
+            TARRAY_GROW(rr, rr->frames, rr->num_frames);
+            f = &rr->frames[rr->num_frames++];
+            *f = (struct cached_frame) { .signature = mix->images[i].signature };
+        }
+
+        // Check to see if we can blindly reuse this cache entry. This is the
+        // case either if the size is compatible, or if the user doesn't care.
+        bool can_reuse = f->tex;
+        if (f->tex && !params->preserve_mixing_cache) {
+            can_reuse = f->tex->params.w == out_w &&
+                        f->tex->params.h == out_h;
+        }
+
+        if (!can_reuse) {
+            // If we can't reuse the entry, we need to render to this
+            // texture first
+            bool ok = pl_tex_recreate(rr->gpu, &f->tex, &(struct pl_tex_params) {
+                .w = out_w,
+                .h = out_h,
+                .format = rr->fbofmt,
+                .sampleable = true,
+                .renderable = true,
+                .storable = rr->fbofmt->caps & PL_FMT_CAP_STORABLE,
+                .sample_mode = (rr->fbofmt->caps & PL_FMT_CAP_LINEAR)
+                                    ? PL_TEX_SAMPLE_LINEAR
+                                    : PL_TEX_SAMPLE_NEAREST,
+            });
+
+            if (!ok) {
+                PL_ERR(rr, "Could not create intermediate texture for "
+                       "frame mixing.. disabling!");
+                rr->disable_mixing = true;
+                goto fallback;
+            }
+
+            // Render to this intermediate target as if it were a normal image
+            struct pl_render_target inter_target = target_skel;
+            inter_target.fbo = f->tex;
+            if (!pl_render_image(rr, &mix->images[i], &inter_target, params)) {
+                PL_ERR(rr, "Could not render image for frame mixing.. disabling!");
+                rr->disable_mixing = true;
+                goto fallback;
+            }
+        }
+
+        // At this point f->tex is fully usable, so we're good to go in terms
+        // of sampling from it
+        ident_t pos, tex = sh_bind(sh, f->tex, "frame", NULL, &pos, NULL, NULL);
+        GLSL("color += texture(%s, %s); \n", tex, pos);
+        // TODO: multiply in weight
+    }
+
+    struct pass_state pass = {
+        .cur_img = {
+            .sh = sh,
+            .w = out_w,
+            .h = out_h,
+            .repr = target_skel.repr,
+            .color = target_skel.color,
+            .comps = 4,
+        },
+    };
+
+    // Dispatch this to the destination
+    if (!pass_output_target(rr, &pass, NULL, &target, params))
+        goto fallback;
+
+    return true;
+
+fallback:
+    abort(); // TODO
 }
 
 void pl_render_target_from_swapchain(struct pl_render_target *out_target,
