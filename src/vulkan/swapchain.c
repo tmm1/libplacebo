@@ -315,9 +315,11 @@ const struct pl_swapchain *pl_vulkan_create_swapchain(const struct pl_vulkan *pl
         p->protoInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     }
 
-    // Attempt creating the first swapchain image
-    if (!vk_sw_start_frame(sw, &p->cached_frame))
-        goto error;
+    // Attempt creating the first swapchain image (if possible)
+    if (vk->vkGetSwapchainStatusKHR) {
+        if (!vk_sw_start_frame(sw, &p->cached_frame))
+            goto error;
+    }
 
     return sw;
 
@@ -541,14 +543,27 @@ static bool vk_sw_start_frame(const struct pl_swapchain *sw,
 {
     struct priv *p = sw->priv;
     struct vk_ctx *vk = p->vk;
-    if (!p->swapchain && !vk_sw_recreate(sw))
-        return false;
 
-    // If we already had a cached frame, re-use that directly
+    if (!p->swapchain && !vk_sw_recreate(sw))
+        goto error;
+
+    // If we already had a cached frame, re-use that directly unless the
+    // swapchain has changed in such a way that we must recreate it for the
+    // acquired image to still make sense.
     if (p->cached_frame.fbo) {
-        *out_frame = p->cached_frame;
-        p->cached_frame.fbo = NULL;
-        return true;
+        assert(p->swapchain);
+        assert(vk->vkGetSwapchainStatusKHR);
+        VkResult res = vk->vkGetSwapchainStatusKHR(vk->dev, p->swapchain);
+        if (res == VK_SUCCESS) {
+            *out_frame = p->cached_frame;
+            p->cached_frame.fbo = NULL;
+            return true;
+        } else {
+            // Swapchain out of date or surface lost, invalidate cached FBO
+            p->cached_frame.fbo = NULL;
+            if (!vk_sw_recreate(sw))
+                goto error;
+        }
     }
 
     if (p->last_imgidx >= 0) {
@@ -580,18 +595,20 @@ static bool vk_sw_start_frame(const struct pl_swapchain *sw,
         case VK_ERROR_OUT_OF_DATE_KHR: {
             // In these cases try recreating the swapchain
             if (!vk_sw_recreate(sw))
-                return false;
+                goto error;
             continue;
         }
 
         default:
             PL_ERR(vk, "Failed acquiring swapchain image: %s", vk_res_str(res));
-            return false;
+            goto error;
         }
     }
 
     // If we've exhausted the number of attempts to recreate the swapchain,
     // just give up silently and let the user retry some time later.
+
+error:
     p->last_imgidx = -1;
     return false;
 }
@@ -680,9 +697,11 @@ static void vk_sw_swap_buffers(const struct pl_swapchain *sw)
     // Pre-fetch the next swapchain image (if possible), since this will also
     // typically block. If not possible, just ignore the error (the user
     // will most likely run into it on the next `start_frame` call)
-    if (!p->cached_frame.fbo && p->last_imgidx < 0) {
-        if (!vk_sw_start_frame(sw, &p->cached_frame))
-            p->cached_frame.fbo = NULL;
+    if (p->vk->vkGetSwapchainStatusKHR) {
+        if (!p->cached_frame.fbo && p->last_imgidx < 0) {
+            if (!vk_sw_start_frame(sw, &p->cached_frame))
+                p->cached_frame.fbo = NULL;
+        }
     }
 }
 

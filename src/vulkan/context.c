@@ -43,6 +43,7 @@ static const char *vk_instance_extensions[] = {
     VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME,
     VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
     VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME,
+    VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME,
 };
 
 // Table of vulkan device extensions and functions they load
@@ -71,7 +72,13 @@ static const struct vk_ext vk_device_extensions[] = {
             VK_DEV_FUN(vkGetSemaphoreFdKHR),
             {0},
         },
-    }
+    }, {
+        .name = VK_KHR_SHARED_PRESENTABLE_IMAGE_EXTENSION_NAME,
+        .funs = (struct vk_ext_fun[]) {
+            VK_DEV_FUN(vkGetSwapchainStatusKHR),
+            {0},
+        },
+    },
 };
 
 void pl_vk_inst_destroy(const struct pl_vk_inst **inst_ptr)

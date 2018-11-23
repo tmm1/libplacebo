@@ -82,4 +82,5 @@ struct vk_ctx {
     VK_FUN(vkCmdPushDescriptorSetKHR);
     VK_FUN(vkGetMemoryFdKHR);
     VK_FUN(vkGetSemaphoreFdKHR);
+    VK_FUN(vkGetSwapchainStatusKHR);
 };
