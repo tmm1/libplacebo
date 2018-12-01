@@ -1,0 +1,69 @@
+stages:
+    - build
+    - test
+
+build-debian:
+    image: registry.videolan.org:5000/dav1d-debian-unstable:20181114201132
+    stage: build
+    tags:
+        - debian
+        - amd64
+    script:
+        - meson build --buildtype release --werror
+        - ninja -C build
+        - cd build && meson test -v
+
+build-debian-static:
+    image: registry.videolan.org:5000/dav1d-debian-unstable:20181114201132
+    stage: build
+    tags:
+        - debian
+        - amd64
+    script:
+        - meson build --buildtype release --default-library static --werror
+        - ninja -C build
+        - cd build && meson test -v
+
+build-win32:
+    image: registry.videolan.org:5000/dav1d-debian-unstable:20181114201132
+    stage: build
+    tags:
+        - win32
+    script:
+        - meson build --buildtype release
+                      --werror
+                      --libdir lib
+                      --cross-file /opt/crossfiles/i686-w64-mingw32.meson
+        - ninja -C build
+
+build-win64:
+    image: registry.videolan.org:5000/dav1d-debian-unstable:20181114201132
+    stage: build
+    tags:
+        - win64
+    script:
+        - meson build --buildtype release
+                      --werror
+                      --libdir lib
+                      --cross-file /opt/crossfiles/x86_64-w64-mingw32.meson
+        - ninja -C build
+
+build-debian-aarch64:
+    stage: build
+    image: registry.videolan.org:5000/dav1d-debian-unstable-aarch64:20181122182457
+    tags:
+        - aarch64
+        - debian
+    script:
+        - meson build --buildtype release --werror
+        - ninja -C build
+        - cd build && meson test -v
+
+build-macos:
+    stage: build
+    tags:
+        - macos
+    script:
+        - meson build --buildtype release -Ddefault_library=both --werror
+        - ninja -C build
+        - cd build && meson test -v
