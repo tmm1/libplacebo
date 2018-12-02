@@ -9,7 +9,7 @@ build-debian:
         - debian
         - amd64
     script:
-        - meson build --buildtype release --werror
+        - meson build --buildtype release --werror -Dtests=true
         - ninja -C build
         - cd build && meson test -v
 
@@ -20,7 +20,10 @@ build-debian-static:
         - debian
         - amd64
     script:
-        - meson build --buildtype release --default-library static --werror
+        - meson build --buildtype release
+                      --default-library static
+                      --werror
+                      -Dtests=true
         - ninja -C build
         - cd build && meson test -v
 
@@ -55,7 +58,7 @@ build-debian-aarch64:
         - aarch64
         - debian
     script:
-        - meson build --buildtype release --werror
+        - meson build --buildtype release --werror -Dtests=true
         - ninja -C build
         - cd build && meson test -v
 
@@ -64,6 +67,9 @@ build-macos:
     tags:
         - macos
     script:
-        - meson build --buildtype release -Ddefault_library=both --werror
+        - meson build --buildtype release
+                      -Ddefault_library=both
+                      -Dtests=true
+                      --werror
         - ninja -C build
         - cd build && meson test -v
