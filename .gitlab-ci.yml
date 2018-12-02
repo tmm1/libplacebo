@@ -112,3 +112,13 @@ test-ubuntu-ubsan:
         - env CC=clang meson build --buildtype debugoptimized -Dtests=true -Db_sanitize=undefined -Db_lundef=false
         - ninja -C build
         - cd build && time meson test -v
+
+test-ubuntu-scan:
+    image: registry.videolan.org:5000/libplacebo-ubuntu-cosmic:20181203182539
+    stage: test
+    tags:
+        - debian
+        - amd64
+    script:
+        - env CC=clang meson build --buildtype debugoptimized --werror -Dtests=true
+        - ninja -C build scan-build
