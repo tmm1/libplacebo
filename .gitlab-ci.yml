@@ -2,8 +2,8 @@ stages:
     - build
     - test
 
-build-debian:
-    image: registry.videolan.org:5000/dav1d-debian-unstable:20181114201132
+build-ubuntu:
+    image: registry.videolan.org:5000/libplacebo-ubuntu-cosmic:20181203182539
     stage: build
     tags:
         - debian
@@ -13,8 +13,8 @@ build-debian:
         - ninja -C build
         - cd build && meson test -v
 
-build-debian-static:
-    image: registry.videolan.org:5000/dav1d-debian-unstable:20181114201132
+build-ubuntu-static:
+    image: registry.videolan.org:5000/libplacebo-ubuntu-cosmic:20181203182539
     stage: build
     tags:
         - debian
@@ -28,7 +28,7 @@ build-debian-static:
         - cd build && meson test -v
 
 build-win32:
-    image: registry.videolan.org:5000/dav1d-debian-unstable:20181114201132
+    image: registry.videolan.org:5000/libplacebo-ubuntu-cosmic:20181203182539
     stage: build
     tags:
         - win32
@@ -40,7 +40,7 @@ build-win32:
         - ninja -C build
 
 build-win64:
-    image: registry.videolan.org:5000/dav1d-debian-unstable:20181114201132
+    image: registry.videolan.org:5000/libplacebo-ubuntu-cosmic:20181203182539
     stage: build
     tags:
         - win64
@@ -74,8 +74,8 @@ build-macos:
         - ninja -C build
         - cd build && meson test -v
 
-test-debian-asan:
-    image: registry.videolan.org:5000/dav1d-debian-unstable:20181114201132
+test-ubuntu-asan:
+    image: registry.videolan.org:5000/libplacebo-ubuntu-cosmic:20181203182539
     stage: test
     tags:
         - debian
@@ -87,8 +87,8 @@ test-debian-asan:
         - ninja -C build
         - cd build && time meson test -v
 
-test-debian-msan:
-    image: registry.videolan.org:5000/dav1d-debian-unstable:20181114201132
+test-ubuntu-msan:
+    image: registry.videolan.org:5000/libplacebo-ubuntu-cosmic:20181203182539
     stage: test
     tags:
         - debian
@@ -100,8 +100,8 @@ test-debian-msan:
         - ninja -C build
         - cd build && time meson test -v
 
-test-debian-ubsan:
-    image: registry.videolan.org:5000/dav1d-debian-unstable:20181114201132
+test-ubuntu-ubsan:
+    image: registry.videolan.org:5000/libplacebo-ubuntu-cosmic:20181203182539
     stage: test
     tags:
         - debian
