@@ -9,7 +9,11 @@ build-ubuntu:
         - debian
         - amd64
     script:
-        - meson build --buildtype release --werror -Dtests=true
+        - meson build --buildtype release
+                      --werror
+                      -Dtests=true
+                      -Dshaderc=enabled
+                      -Dglslang=enabled
         - ninja -C build
         - cd build && meson test -v
 
@@ -24,6 +28,8 @@ build-ubuntu-static:
                       --default-library static
                       --werror
                       -Dtests=true
+                      -Dshaderc=enabled
+                      -Dglslang=enabled
         - ninja -C build
         - cd build && meson test -v
 
@@ -120,5 +126,9 @@ test-ubuntu-scan:
         - debian
         - amd64
     script:
-        - env CC=clang meson build --buildtype debugoptimized --werror -Dtests=true
+        - env CC=clang meson build --buildtype debugoptimized
+                                   --werror
+                                   -Dtests=true
+                                   -Dshaderc=enabled
+                                   -Dglslang=enabled
         - ninja -C build scan-build
