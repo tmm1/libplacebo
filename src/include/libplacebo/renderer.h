@@ -23,6 +23,7 @@
 #include <libplacebo/gpu.h>
 #include <libplacebo/shaders/colorspace.h>
 #include <libplacebo/shaders/sampling.h>
+#include <libplacebo/shaders/custom.h>
 #include <libplacebo/swapchain.h>
 
 struct pl_renderer;
@@ -116,6 +117,11 @@ struct pl_render_params {
     // Configures the settings used to simulate color blindness, if desired.
     // If NULL, this feature is disabled.
     const struct pl_cone_params *cone_params;
+
+    // List of custom user shaders / hooks.
+    // See <libplacebo/shaders/custom.h> for more information.
+    const struct pl_hook **hooks;
+    int num_hooks;
 
     // --- Performance / quality trade-off options:
     // These should generally be left off where quality is desired, as they can
