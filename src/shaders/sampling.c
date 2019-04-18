@@ -660,3 +660,428 @@ bool pl_shader_sample_ortho(struct pl_shader *sh, int pass,
     GLSL("}\n");
     return true;
 }
+
+bool pl_shader_ravu_r3_hack(struct pl_shader *sh, int pass,
+                            const struct pl_sample_src *src,
+                            const struct pl_tex *lut,
+                            const struct pl_tex **sub);
+
+bool pl_shader_ravu_r3_hack(struct pl_shader *sh, int pass,
+                            const struct pl_sample_src *src,
+                            const struct pl_tex *lut,
+                            const struct pl_tex **sub)
+{
+    float scale;
+    ident_t tex, pos, pt, size;
+    const char *fn;
+    if (!setup_src(sh, src, &tex, &pos, &size, &pt, NULL, NULL, NULL, &scale, true, &fn))
+        return false;
+
+    GLSLH("#define HOOKED_raw %s\n", tex);
+    GLSLH("#define HOOKED_pos %s\n", pos);
+    GLSLH("#define HOOKED_size %s\n", size);
+    GLSLH("#define HOOKED_pt %s\n", pt);
+    GLSLH("#define HOOKED_mul %f\n", scale);
+    GLSLH("#define HOOKED_texOff(off) texture(HOOKED_raw, HOOKED_pos + HOOKED_pt * vec2(off))\n");
+
+    tex = sh_bind(sh, lut, "ravu_lut3", NULL, NULL, NULL, NULL);
+    GLSLH("#define ravu_lut3 %s\n", tex);
+
+// Copyright 2017-2019 Bin Jin
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+    if (pass == 0) {
+        GLSL(
+            "vec4 gathered0 = HOOKED_mul * textureGatherOffset(HOOKED_raw, HOOKED_pos, ivec2(-2, -2), 0);"
+            "vec4 gathered1 = HOOKED_mul * textureGatherOffset(HOOKED_raw, HOOKED_pos, ivec2(-2, 0), 0);"
+            "vec4 gathered2 = HOOKED_mul * textureGatherOffset(HOOKED_raw, HOOKED_pos, ivec2(-2, 2), 0);"
+            "vec4 gathered3 = HOOKED_mul * textureGatherOffset(HOOKED_raw, HOOKED_pos, ivec2(0, -2), 0);"
+            "vec4 gathered4 = HOOKED_mul * textureGatherOffset(HOOKED_raw, HOOKED_pos, ivec2(0, 0), 0);"
+            "vec4 gathered5 = HOOKED_mul * textureGatherOffset(HOOKED_raw, HOOKED_pos, ivec2(0, 2), 0);"
+            "vec4 gathered6 = HOOKED_mul * textureGatherOffset(HOOKED_raw, HOOKED_pos, ivec2(2, -2), 0);"
+            "vec4 gathered7 = HOOKED_mul * textureGatherOffset(HOOKED_raw, HOOKED_pos, ivec2(2, 0), 0);"
+            "vec4 gathered8 = HOOKED_mul * textureGatherOffset(HOOKED_raw, HOOKED_pos, ivec2(2, 2), 0);"
+            "vec3 abd = vec3(0.0);"
+            "float gx, gy;"
+            "gx = (gathered3[0]-gathered0[0])/2.0;"
+            "gy = (gathered1[2]-gathered0[2])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.04792235409415088;"
+            "gx = (gathered4[3]-gathered1[3])/2.0;"
+            "gy = (-gathered2[2]+8.0*gathered1[1]-8.0*gathered0[1]+gathered0[2])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (gathered4[0]-gathered1[0])/2.0;"
+            "gy = (-gathered2[1]+8.0*gathered2[2]-8.0*gathered1[2]+gathered0[1])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (gathered5[3]-gathered2[3])/2.0;"
+            "gy = (gathered2[1]-gathered1[1])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.04792235409415088;"
+            "gx = (-gathered6[0]+8.0*gathered3[1]-8.0*gathered0[1]+gathered0[0])/12.0;"
+            "gy = (gathered4[3]-gathered3[3])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (-gathered7[3]+8.0*gathered4[2]-8.0*gathered1[2]+gathered1[3])/12.0;"
+            "gy = (-gathered5[3]+8.0*gathered4[0]-8.0*gathered3[0]+gathered3[3])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.07901060453704994;"
+            "gx = (-gathered7[0]+8.0*gathered4[1]-8.0*gathered1[1]+gathered1[0])/12.0;"
+            "gy = (-gathered5[0]+8.0*gathered5[3]-8.0*gathered4[3]+gathered3[0])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.07901060453704994;"
+            "gx = (-gathered8[3]+8.0*gathered5[2]-8.0*gathered2[2]+gathered2[3])/12.0;"
+            "gy = (gathered5[0]-gathered4[0])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (-gathered6[1]+8.0*gathered6[0]-8.0*gathered3[0]+gathered0[1])/12.0;"
+            "gy = (gathered4[2]-gathered3[2])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (-gathered7[2]+8.0*gathered7[3]-8.0*gathered4[3]+gathered1[2])/12.0;"
+            "gy = (-gathered5[2]+8.0*gathered4[1]-8.0*gathered3[1]+gathered3[2])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.07901060453704994;"
+            "gx = (-gathered7[1]+8.0*gathered7[0]-8.0*gathered4[0]+gathered1[1])/12.0;"
+            "gy = (-gathered5[1]+8.0*gathered5[2]-8.0*gathered4[2]+gathered3[1])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.07901060453704994;"
+            "gx = (-gathered8[2]+8.0*gathered8[3]-8.0*gathered5[3]+gathered2[2])/12.0;"
+            "gy = (gathered5[1]-gathered4[1])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (gathered6[1]-gathered3[1])/2.0;"
+            "gy = (gathered7[3]-gathered6[3])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.04792235409415088;"
+            "gx = (gathered7[2]-gathered4[2])/2.0;"
+            "gy = (-gathered8[3]+8.0*gathered7[0]-8.0*gathered6[0]+gathered6[3])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (gathered7[1]-gathered4[1])/2.0;"
+            "gy = (-gathered8[0]+8.0*gathered8[3]-8.0*gathered7[3]+gathered6[0])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (gathered8[2]-gathered5[2])/2.0;"
+            "gy = (gathered8[0]-gathered7[0])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.04792235409415088;"
+            "float a = abd.x, b = abd.y, d = abd.z;"
+            "float T = a + d, D = a * d - b * b;"
+            "float delta = sqrt(max(T * T / 4.0 - D, 0.0));"
+            "float L1 = T / 2.0 + delta, L2 = T / 2.0 - delta;"
+            "float sqrtL1 = sqrt(L1), sqrtL2 = sqrt(L2);"
+            "float theta = mix(mod(atan(L1 - a, b) + 3.141592653589793, 3.141592653589793), 0.0, abs(b) < 1.192092896e-7);"
+            "float lambda = sqrtL1;"
+            "float mu = mix((sqrtL1 - sqrtL2) / (sqrtL1 + sqrtL2), 0.0, sqrtL1 + sqrtL2 < 1.192092896e-7);"
+            "float angle = floor(theta * 24.0 / 3.141592653589793);"
+            "float strength = clamp(floor(log2(lambda * 2000.0 + 1.192092896e-7)), 0.0, 8.0);"
+            "float coherence = mix(mix(0.0, 1.0, mu >= 0.25), 2.0, mu >= 0.5);"
+            "float coord_y = ((angle * 9.0 + strength) * 3.0 + coherence + 0.5) / 648.0;"
+            "float res = 0.0;"
+            "vec4 w;"
+            "w = texture(ravu_lut3, vec2(0.1, coord_y));"
+            "res += (gathered0[3] + gathered8[1]) * w[0];"
+            "res += (gathered0[0] + gathered8[2]) * w[1];"
+            "res += (gathered1[3] + gathered7[1]) * w[2];"
+            "res += (gathered1[0] + gathered7[2]) * w[3];"
+            "w = texture(ravu_lut3, vec2(0.3, coord_y));"
+            "res += (gathered2[3] + gathered6[1]) * w[0];"
+            "res += (gathered2[0] + gathered6[2]) * w[1];"
+            "res += (gathered0[2] + gathered8[0]) * w[2];"
+            "res += (gathered0[1] + gathered8[3]) * w[3];"
+            "w = texture(ravu_lut3, vec2(0.5, coord_y));"
+            "res += (gathered1[2] + gathered7[0]) * w[0];"
+            "res += (gathered1[1] + gathered7[3]) * w[1];"
+            "res += (gathered2[2] + gathered6[0]) * w[2];"
+            "res += (gathered2[1] + gathered6[3]) * w[3];"
+            "w = texture(ravu_lut3, vec2(0.7, coord_y));"
+            "res += (gathered3[3] + gathered5[1]) * w[0];"
+            "res += (gathered3[0] + gathered5[2]) * w[1];"
+            "res += (gathered4[3] + gathered4[1]) * w[2];"
+            "res += (gathered4[0] + gathered4[2]) * w[3];"
+            "w = texture(ravu_lut3, vec2(0.9, coord_y));"
+            "res += (gathered5[3] + gathered3[1]) * w[0];"
+            "res += (gathered5[0] + gathered3[2]) * w[1];"
+            "res = clamp(res, 0.0, 1.0);"
+            "vec4 color = vec4(res, 0.0, 0.0, 1.0);"
+        );
+    } else if (pass == 1) {
+        sh->res.output = PL_SHADER_SIG_NONE; // hacks upon hacks
+        setup_src(sh, &(struct pl_sample_src) { .tex = sub[0] }, &tex, &pos,
+                  NULL, &pt, NULL, NULL, NULL, &scale, true, &fn);
+        GLSLH("#define ravu_int11_raw %s\n", tex);
+        GLSLH("#define ravu_int11_pos %s\n", pos);
+        GLSLH("#define ravu_int11_pt %s\n", pt);
+        GLSLH("#define ravu_int11_mul %f\n", scale);
+        GLSLH("#define ravu_int11_texOff(off) texture(ravu_int11_raw, ravu_int11_pos + ravu_int11_pt * vec2(off))\n");
+
+        GLSL(
+            "vec4 gathered0 = HOOKED_mul * textureGatherOffset(HOOKED_raw, HOOKED_pos, ivec2(-1, -1), 0);"
+            "vec4 gathered1 = HOOKED_mul * textureGatherOffset(HOOKED_raw, HOOKED_pos, ivec2(0, 1), 0);"
+            "vec4 gathered2 = HOOKED_mul * textureGatherOffset(HOOKED_raw, HOOKED_pos, ivec2(1, -1), 0);"
+            "vec4 gathered3 = ravu_int11_mul * textureGatherOffset(ravu_int11_raw, ravu_int11_pos, ivec2(-2, -1), 0);"
+            "vec4 gathered4 = ravu_int11_mul * textureGatherOffset(ravu_int11_raw, ravu_int11_pos, ivec2(0, -2), 0);"
+            "vec4 gathered5 = ravu_int11_mul * textureGatherOffset(ravu_int11_raw, ravu_int11_pos, ivec2(0, 0), 0);"
+            "float sample0 = HOOKED_texOff(vec2(-2.0, 0.0)).x;"
+            "float sample2 = HOOKED_texOff(vec2(-1.0, 1.0)).x;"
+            "float sample24 = HOOKED_texOff(vec2(0.0, -2.0)).x;"
+            "float sample31 = HOOKED_texOff(vec2(1.0, -2.0)).x;"
+            "float sample23 = HOOKED_texOff(vec2(2.0, 1.0)).x;"
+            "float sample35 = HOOKED_texOff(vec2(3.0, 0.0)).x;"
+            "float sample18 = ravu_int11_texOff(vec2(-1.0, -2.0)).x;"
+            "float sample3 = ravu_int11_texOff(vec2(-1.0, 1.0)).x;"
+            "float sample30 = ravu_int11_texOff(vec2(0.0, -3.0)).x;"
+            "float sample5 = ravu_int11_texOff(vec2(0.0, 2.0)).x;"
+            "float sample34 = ravu_int11_texOff(vec2(2.0, -1.0)).x;"
+            "float sample29 = ravu_int11_texOff(vec2(2.0, 0.0)).x;"
+            "vec3 abd = vec3(0.0);"
+            "float gx, gy;"
+            "gx = (gathered3[2]-gathered3[0])/2.0;"
+            "gy = (gathered3[1]-gathered3[3])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.04792235409415088;"
+            "gx = (gathered0[1]-sample2)/2.0;"
+            "gy = (-gathered5[0]+8.0*gathered1[3]-8.0*gathered0[0]+gathered3[3])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (gathered5[3]-sample3)/2.0;"
+            "gy = (-gathered1[1]+8.0*gathered5[0]-8.0*gathered3[1]+gathered0[0])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (gathered1[2]-gathered1[0])/2.0;"
+            "gy = (gathered1[1]-gathered1[3])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.04792235409415088;"
+            "gx = (-gathered4[3]+8.0*gathered0[2]-8.0*gathered0[0]+gathered3[0])/12.0;"
+            "gy = (gathered0[1]-gathered0[3])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (-gathered2[3]+8.0*gathered4[0]-8.0*gathered3[1]+sample2)/12.0;"
+            "gy = (-gathered1[2]+8.0*gathered5[3]-8.0*gathered3[2]+gathered0[3])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.07901060453704994;"
+            "gx = (-gathered4[1]+8.0*gathered2[0]-8.0*gathered1[3]+sample3)/12.0;"
+            "gy = (-gathered5[1]+8.0*gathered1[2]-8.0*gathered0[1]+gathered3[2])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.07901060453704994;"
+            "gx = (-gathered2[1]+8.0*gathered5[2]-8.0*gathered5[0]+gathered1[0])/12.0;"
+            "gy = (gathered5[1]-gathered5[3])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (-sample31+8.0*gathered4[3]-8.0*gathered3[2]+gathered0[0])/12.0;"
+            "gy = (gathered4[0]-sample18)/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (-gathered4[2]+8.0*gathered2[3]-8.0*gathered0[1]+gathered3[1])/12.0;"
+            "gy = (-gathered5[2]+8.0*gathered2[0]-8.0*gathered0[2]+sample18)/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.07901060453704994;"
+            "gx = (-gathered2[2]+8.0*gathered4[1]-8.0*gathered5[3]+gathered1[3])/12.0;"
+            "gy = (-sample23+8.0*gathered5[2]-8.0*gathered4[0]+gathered0[2])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.07901060453704994;"
+            "gx = (-sample34+8.0*gathered2[1]-8.0*gathered1[2]+gathered5[0])/12.0;"
+            "gy = (sample23-gathered2[0])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (sample31-gathered0[2])/2.0;"
+            "gy = (gathered2[3]-sample24)/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.04792235409415088;"
+            "gx = (gathered4[2]-gathered4[0])/2.0;"
+            "gy = (-gathered2[1]+8.0*gathered4[1]-8.0*gathered4[3]+sample24)/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (gathered2[2]-gathered2[0])/2.0;"
+            "gy = (-sample29+8.0*gathered2[1]-8.0*gathered2[3]+gathered4[3])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (sample34-gathered5[2])/2.0;"
+            "gy = (sample29-gathered4[1])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.04792235409415088;"
+            "float a = abd.x, b = abd.y, d = abd.z;"
+            "float T = a + d, D = a * d - b * b;"
+            "float delta = sqrt(max(T * T / 4.0 - D, 0.0));"
+            "float L1 = T / 2.0 + delta, L2 = T / 2.0 - delta;"
+            "float sqrtL1 = sqrt(L1), sqrtL2 = sqrt(L2);"
+            "float theta = mix(mod(atan(L1 - a, b) + 3.141592653589793, 3.141592653589793), 0.0, abs(b) < 1.192092896e-7);"
+            "float lambda = sqrtL1;"
+            "float mu = mix((sqrtL1 - sqrtL2) / (sqrtL1 + sqrtL2), 0.0, sqrtL1 + sqrtL2 < 1.192092896e-7);"
+            "float angle = floor(theta * 24.0 / 3.141592653589793);"
+            "float strength = clamp(floor(log2(lambda * 2000.0 + 1.192092896e-7)), 0.0, 8.0);"
+            "float coherence = mix(mix(0.0, 1.0, mu >= 0.25), 2.0, mu >= 0.5);"
+            "float coord_y = ((angle * 9.0 + strength) * 3.0 + coherence + 0.5) / 648.0;"
+            "float res = 0.0;"
+            "vec4 w;"
+            "w = texture(ravu_lut3, vec2(0.1, coord_y));"
+            "res += (sample0 + sample35) * w[0];"
+            "res += (gathered3[0] + sample34) * w[1];"
+            "res += (sample2 + gathered2[2]) * w[2];"
+            "res += (sample3 + gathered4[2]) * w[3];"
+            "w = texture(ravu_lut3, vec2(0.3, coord_y));"
+            "res += (gathered1[0] + sample31) * w[0];"
+            "res += (sample5 + sample30) * w[1];"
+            "res += (gathered3[3] + sample29) * w[2];"
+            "res += (gathered0[0] + gathered2[1]) * w[3];"
+            "w = texture(ravu_lut3, vec2(0.5, coord_y));"
+            "res += (gathered3[1] + gathered4[1]) * w[0];"
+            "res += (gathered1[3] + gathered2[3]) * w[1];"
+            "res += (gathered5[0] + gathered4[3]) * w[2];"
+            "res += (gathered1[1] + sample24) * w[3];"
+            "w = texture(ravu_lut3, vec2(0.7, coord_y));"
+            "res += (gathered0[3] + sample23) * w[0];"
+            "res += (gathered3[2] + gathered5[2]) * w[1];"
+            "res += (gathered0[1] + gathered2[0]) * w[2];"
+            "res += (gathered5[3] + gathered4[0]) * w[3];"
+            "w = texture(ravu_lut3, vec2(0.9, coord_y));"
+            "res += (gathered1[2] + gathered0[2]) * w[0];"
+            "res += (gathered5[1] + sample18) * w[1];"
+            "res = clamp(res, 0.0, 1.0);"
+            "vec4 color = vec4(res, 0.0, 0.0, 1.0);"
+        );
+    } else if (pass == 2) {
+        sh->res.output = PL_SHADER_SIG_NONE; // hacks upon hacks
+        setup_src(sh, &(struct pl_sample_src) { .tex = sub[0] }, &tex, &pos,
+                  NULL, &pt, NULL, NULL, NULL, &scale, true, &fn);
+        GLSLH("#define ravu_int11_raw %s\n", tex);
+        GLSLH("#define ravu_int11_pos %s\n", pos);
+        GLSLH("#define ravu_int11_pt %s\n", pt);
+        GLSLH("#define ravu_int11_mul %f\n", scale);
+        GLSLH("#define ravu_int11_texOff(off) texture(ravu_int11_raw, ravu_int11_pos + ravu_int11_pt * vec2(off))\n");
+
+        GLSL(
+            "vec4 gathered0 = HOOKED_mul * textureGatherOffset(HOOKED_raw, HOOKED_pos, ivec2(-2, 0), 0);"
+            "vec4 gathered1 = HOOKED_mul * textureGatherOffset(HOOKED_raw, HOOKED_pos, ivec2(0, -1), 0);"
+            "vec4 gathered2 = HOOKED_mul * textureGatherOffset(HOOKED_raw, HOOKED_pos, ivec2(0, 1), 0);"
+            "vec4 gathered3 = ravu_int11_mul * textureGatherOffset(ravu_int11_raw, ravu_int11_pos, ivec2(-2, -1), 0);"
+            "vec4 gathered4 = ravu_int11_mul * textureGatherOffset(ravu_int11_raw, ravu_int11_pos, ivec2(-1, 1), 0);"
+            "vec4 gathered5 = ravu_int11_mul * textureGatherOffset(ravu_int11_raw, ravu_int11_pos, ivec2(0, -1), 0);"
+            "float sample18 = HOOKED_texOff(vec2(-1.0, -1.0)).x;"
+            "float sample3 = HOOKED_texOff(vec2(-1.0, 2.0)).x;"
+            "float sample30 = HOOKED_texOff(vec2(0.0, -2.0)).x;"
+            "float sample5 = HOOKED_texOff(vec2(0.0, 3.0)).x;"
+            "float sample34 = HOOKED_texOff(vec2(2.0, 0.0)).x;"
+            "float sample29 = HOOKED_texOff(vec2(2.0, 1.0)).x;"
+            "float sample0 = ravu_int11_texOff(vec2(-3.0, 0.0)).x;"
+            "float sample2 = ravu_int11_texOff(vec2(-2.0, 1.0)).x;"
+            "float sample24 = ravu_int11_texOff(vec2(-1.0, -2.0)).x;"
+            "float sample31 = ravu_int11_texOff(vec2(0.0, -2.0)).x;"
+            "float sample23 = ravu_int11_texOff(vec2(1.0, 1.0)).x;"
+            "float sample35 = ravu_int11_texOff(vec2(2.0, 0.0)).x;"
+            "vec3 abd = vec3(0.0);"
+            "float gx, gy;"
+            "gx = (gathered0[2]-gathered0[0])/2.0;"
+            "gy = (gathered0[1]-gathered0[3])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.04792235409415088;"
+            "gx = (gathered3[1]-sample2)/2.0;"
+            "gy = (-gathered2[0]+8.0*gathered4[3]-8.0*gathered3[0]+gathered0[3])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (gathered2[3]-sample3)/2.0;"
+            "gy = (-gathered4[1]+8.0*gathered2[0]-8.0*gathered0[1]+gathered3[0])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (gathered4[2]-gathered4[0])/2.0;"
+            "gy = (gathered4[1]-gathered4[3])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.04792235409415088;"
+            "gx = (-gathered1[3]+8.0*gathered3[2]-8.0*gathered3[0]+gathered0[0])/12.0;"
+            "gy = (gathered3[1]-gathered3[3])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (-gathered5[3]+8.0*gathered1[0]-8.0*gathered0[1]+sample2)/12.0;"
+            "gy = (-gathered4[2]+8.0*gathered2[3]-8.0*gathered0[2]+gathered3[3])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.07901060453704994;"
+            "gx = (-gathered1[1]+8.0*gathered5[0]-8.0*gathered4[3]+sample3)/12.0;"
+            "gy = (-gathered2[1]+8.0*gathered4[2]-8.0*gathered3[1]+gathered0[2])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.07901060453704994;"
+            "gx = (-gathered5[1]+8.0*gathered2[2]-8.0*gathered2[0]+gathered4[0])/12.0;"
+            "gy = (gathered2[1]-gathered2[3])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (-sample31+8.0*gathered1[3]-8.0*gathered0[2]+gathered3[0])/12.0;"
+            "gy = (gathered1[0]-sample18)/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (-gathered1[2]+8.0*gathered5[3]-8.0*gathered3[1]+gathered0[1])/12.0;"
+            "gy = (-gathered2[2]+8.0*gathered5[0]-8.0*gathered3[2]+sample18)/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.07901060453704994;"
+            "gx = (-gathered5[2]+8.0*gathered1[1]-8.0*gathered2[3]+gathered4[3])/12.0;"
+            "gy = (-sample23+8.0*gathered2[2]-8.0*gathered1[0]+gathered3[2])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.07901060453704994;"
+            "gx = (-sample34+8.0*gathered5[1]-8.0*gathered4[2]+gathered2[0])/12.0;"
+            "gy = (sample23-gathered5[0])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (sample31-gathered3[2])/2.0;"
+            "gy = (gathered5[3]-sample24)/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.04792235409415088;"
+            "gx = (gathered1[2]-gathered1[0])/2.0;"
+            "gy = (-gathered5[1]+8.0*gathered1[1]-8.0*gathered1[3]+sample24)/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (gathered5[2]-gathered5[0])/2.0;"
+            "gy = (-sample29+8.0*gathered5[1]-8.0*gathered5[3]+gathered1[3])/12.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.06153352068439959;"
+            "gx = (sample34-gathered2[2])/2.0;"
+            "gy = (sample29-gathered1[1])/2.0;"
+            "abd += vec3(gx * gx, gx * gy, gy * gy) * 0.04792235409415088;"
+            "float a = abd.x, b = abd.y, d = abd.z;"
+            "float T = a + d, D = a * d - b * b;"
+            "float delta = sqrt(max(T * T / 4.0 - D, 0.0));"
+            "float L1 = T / 2.0 + delta, L2 = T / 2.0 - delta;"
+            "float sqrtL1 = sqrt(L1), sqrtL2 = sqrt(L2);"
+            "float theta = mix(mod(atan(L1 - a, b) + 3.141592653589793, 3.141592653589793), 0.0, abs(b) < 1.192092896e-7);"
+            "float lambda = sqrtL1;"
+            "float mu = mix((sqrtL1 - sqrtL2) / (sqrtL1 + sqrtL2), 0.0, sqrtL1 + sqrtL2 < 1.192092896e-7);"
+            "float angle = floor(theta * 24.0 / 3.141592653589793);"
+            "float strength = clamp(floor(log2(lambda * 2000.0 + 1.192092896e-7)), 0.0, 8.0);"
+            "float coherence = mix(mix(0.0, 1.0, mu >= 0.25), 2.0, mu >= 0.5);"
+            "float coord_y = ((angle * 9.0 + strength) * 3.0 + coherence + 0.5) / 648.0;"
+            "float res = 0.0;"
+            "vec4 w;"
+            "w = texture(ravu_lut3, vec2(0.1, coord_y));"
+            "res += (sample0 + sample35) * w[0];"
+            "res += (gathered0[0] + sample34) * w[1];"
+            "res += (sample2 + gathered5[2]) * w[2];"
+            "res += (sample3 + gathered1[2]) * w[3];"
+            "w = texture(ravu_lut3, vec2(0.3, coord_y));"
+            "res += (gathered4[0] + sample31) * w[0];"
+            "res += (sample5 + sample30) * w[1];"
+            "res += (gathered0[3] + sample29) * w[2];"
+            "res += (gathered3[0] + gathered5[1]) * w[3];"
+            "w = texture(ravu_lut3, vec2(0.5, coord_y));"
+            "res += (gathered0[1] + gathered1[1]) * w[0];"
+            "res += (gathered4[3] + gathered5[3]) * w[1];"
+            "res += (gathered2[0] + gathered1[3]) * w[2];"
+            "res += (gathered4[1] + sample24) * w[3];"
+            "w = texture(ravu_lut3, vec2(0.7, coord_y));"
+            "res += (gathered3[3] + sample23) * w[0];"
+            "res += (gathered0[2] + gathered2[2]) * w[1];"
+            "res += (gathered3[1] + gathered5[0]) * w[2];"
+            "res += (gathered2[3] + gathered1[0]) * w[3];"
+            "w = texture(ravu_lut3, vec2(0.9, coord_y));"
+            "res += (gathered4[2] + gathered3[2]) * w[0];"
+            "res += (gathered2[1] + sample18) * w[1];"
+            "res = clamp(res, 0.0, 1.0);"
+            "vec4 color = vec4(res, 0.0, 0.0, 1.0);"
+        );
+    } else {
+        sh->res.output = PL_SHADER_SIG_NONE; // hacks upon hacks
+        setup_src(sh, &(struct pl_sample_src) { .tex = sub[1] }, &tex, &pos,
+                  NULL, &pt, NULL, NULL, NULL, &scale, true, &fn);
+        GLSLH("#define ravu_int10_raw %s\n", tex);
+        GLSLH("#define ravu_int10_pos %s\n", pos);
+        GLSLH("#define ravu_int10_pt %s\n", pt);
+        GLSLH("#define ravu_int10_mul %f\n", scale);
+        GLSLH("#define ravu_int10_texOff(off) texture(ravu_int10_raw, ravu_int10_pos + ravu_int10_pt * vec2(off))\n");
+
+        sh->res.output = PL_SHADER_SIG_NONE; // hacks upon hacks
+        setup_src(sh, &(struct pl_sample_src) { .tex = sub[0] }, &tex, &pos,
+                  NULL, &pt, NULL, NULL, NULL, &scale, true, &fn);
+        GLSLH("#define ravu_int11_raw %s\n", tex);
+        GLSLH("#define ravu_int11_pos %s\n", pos);
+        GLSLH("#define ravu_int11_pt %s\n", pt);
+        GLSLH("#define ravu_int11_mul %f\n", scale);
+        GLSLH("#define ravu_int11_texOff(off) texture(ravu_int11_raw, ravu_int11_pos + ravu_int11_pt* vec2(off))\n");
+
+        sh->res.output = PL_SHADER_SIG_NONE; // hacks upon hacks
+        setup_src(sh, &(struct pl_sample_src) { .tex = sub[2] }, &tex, &pos,
+                  NULL, &pt, NULL, NULL, NULL, &scale, true, &fn);
+        GLSLH("#define ravu_int01_raw %s\n", tex);
+        GLSLH("#define ravu_int01_pos %s\n", pos);
+        GLSLH("#define ravu_int01_pt %s\n", pt);
+        GLSLH("#define ravu_int01_mul %f\n", scale);
+        GLSLH("#define ravu_int01_texOff(off) texture(ravu_int01_raw, ravu_int01_pos + ravu_int01_pt * vec2(off))\n");
+
+        GLSL(
+            "vec4 color;"
+            "vec2 dir = fract(HOOKED_pos * HOOKED_size) - 0.5;"
+            "if (dir.x < 0.0) {"
+            "    if (dir.y < 0.0)"
+            "        color = HOOKED_texOff(-dir);"
+            "    else color = ravu_int01_texOff(-dir);"
+            "} else {"
+            "    if (dir.y < 0.0)"
+            "        color = ravu_int10_texOff(-dir);"
+            "    else color = ravu_int11_texOff(-dir);"
+            "}"
+        );
+    }
+
+    return true;
+}

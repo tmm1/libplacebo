@@ -180,6 +180,9 @@ struct pl_render_params {
     // unnecessary. This is slower, but may improve the quality of the gamut
     // reduction step, if one is performed.
     bool force_3dlut;
+
+    // Demo hacks
+    bool enable_luma_ravu_hack_r3;
 };
 
 // This contains the default/recommended options for reasonable image quality,
