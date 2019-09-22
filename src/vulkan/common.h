@@ -47,6 +47,8 @@
 #define PL_VK_MAX_PENDING_CMDS 64
 
 // Shared struct used to hold vulkan context information
+//
+// Thread-safety: Unsafe (FIXME)
 struct vk_ctx {
     const struct pl_vk_inst *internal_instance;
     struct pl_context *ctx;

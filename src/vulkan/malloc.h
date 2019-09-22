@@ -19,6 +19,9 @@
 
 #include "common.h"
 
+// Thread-safety: Safe (TODO)
+struct vk_malloc;
+
 // All memory allocated from a vk_malloc MUST be explicitly released by
 // the caller before vk_malloc_destroy is called.
 struct vk_malloc *vk_malloc_create(struct vk_ctx *vk);

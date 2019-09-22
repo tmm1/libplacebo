@@ -15,6 +15,8 @@
  * License along with libplacebo. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <pthread.h>
+
 #include "gpu.h"
 #include "command.h"
 #include "formats.h"
@@ -38,6 +40,8 @@ struct pl_vk {
     struct vk_ctx *vk;
     struct vk_malloc *alloc;
     struct spirv_compiler *spirv;
+    pthread_mutex_t lock;
+    bool locked;
 
     // Some additional cached device limits
     uint32_t max_push_descriptors;
@@ -63,10 +67,27 @@ struct vk_ctx *pl_vk_get(const struct pl_gpu *gpu)
     return p->vk;
 }
 
+static void vk_lock(const struct pl_gpu *gpu)
+{
+    struct pl_vk *p = gpu->priv;
+    pthread_mutex_lock(&p->lock);
+    assert(!p->locked);
+    p->locked = true;
+}
+
+static void vk_unlock(const struct pl_gpu *gpu)
+{
+    struct pl_vk *p = gpu->priv;
+    assert(p->locked);
+    p->locked = false;
+    pthread_mutex_unlock(&p->lock);
+}
+
 static void vk_submit(const struct pl_gpu *gpu)
 {
     struct pl_vk *p = gpu->priv;
     struct vk_ctx *vk = pl_vk_get(gpu);
+    assert(p->locked);
 
     if (p->cmd) {
         vk_cmd_queue(vk, p->cmd);
@@ -80,6 +101,7 @@ static struct vk_cmd *vk_require_cmd(const struct pl_gpu *gpu,
 {
     struct pl_vk *p = gpu->priv;
     struct vk_ctx *vk = pl_vk_get(gpu);
+    assert(p->locked);
 
     struct vk_cmdpool *pool;
     switch (type) {
@@ -122,6 +144,7 @@ static void vk_destroy_gpu(const struct pl_gpu *gpu)
     struct pl_vk *p = gpu->priv;
     struct vk_ctx *vk = pl_vk_get(gpu);
 
+    vk_lock(gpu);
     pl_dispatch_destroy(&p->dp);
     vk_submit(gpu);
     vk_wait_idle(vk);
@@ -129,6 +152,7 @@ static void vk_destroy_gpu(const struct pl_gpu *gpu)
     vk_malloc_destroy(&p->alloc);
     spirv_compiler_destroy(&p->spirv);
 
+    pthread_mutex_destroy(&p->lock);
     talloc_free((void *) gpu);
 }
 
@@ -306,6 +330,12 @@ const struct pl_gpu *pl_gpu_create_vk(struct vk_ctx *vk)
 
     struct pl_vk *p = gpu->priv = talloc_zero(gpu, struct pl_vk);
     p->vk = vk;
+    int err = pthread_mutex_init(&p->lock, NULL);
+    if (err != 0) {
+        PL_ERR(gpu, "Failed initializing pthread mutex: %s", strerror(err));
+        talloc_free(gpu);
+        return NULL;
+    }
 
     p->spirv = spirv_compiler_create(vk->ctx);
     p->alloc = vk_malloc_create(vk);
@@ -593,6 +623,7 @@ static void vk_tex_destroy(const struct pl_gpu *gpu, struct pl_tex *tex)
     pl_buf_pool_uninit(gpu, &tex_vk->tmp_read);
     pl_buf_pool_uninit(gpu, &tex_vk->pbo_write);
     pl_buf_pool_uninit(gpu, &tex_vk->pbo_read);
+
     vk_sync_deref(gpu, tex_vk->ext_sync);
     vk_signal_destroy(vk, &tex_vk->sig);
     vkDestroyFramebuffer(vk->dev, tex_vk->framebuffer, VK_ALLOC);
@@ -957,9 +988,12 @@ static void vk_tex_clear(const struct pl_gpu *gpu, const struct pl_tex *tex,
 {
     struct pl_tex_vk *tex_vk = tex->priv;
 
+    vk_lock(gpu);
     struct vk_cmd *cmd = vk_require_cmd(gpu, GRAPHICS);
-    if (!cmd)
+    if (!cmd) {
+        vk_unlock(gpu);
         return;
+    }
 
     tex_barrier(gpu, cmd, tex, VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -980,6 +1014,7 @@ static void vk_tex_clear(const struct pl_gpu *gpu, const struct pl_tex *tex,
                          &clearColor, 1, &range);
 
     tex_signal(gpu, cmd, tex, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    vk_unlock(gpu);
 }
 
 static void vk_tex_blit(const struct pl_gpu *gpu,
@@ -989,9 +1024,12 @@ static void vk_tex_blit(const struct pl_gpu *gpu,
     struct pl_tex_vk *src_vk = src->priv;
     struct pl_tex_vk *dst_vk = dst->priv;
 
+    vk_lock(gpu);
     struct vk_cmd *cmd = vk_require_cmd(gpu, GRAPHICS);
-    if (!cmd)
+    if (!cmd) {
+        vk_unlock(gpu);
         return;
+    }
 
     tex_barrier(gpu, cmd, src, VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_ACCESS_TRANSFER_READ_BIT,
@@ -1045,6 +1083,7 @@ static void vk_tex_blit(const struct pl_gpu *gpu,
 
     tex_signal(gpu, cmd, src, VK_PIPELINE_STAGE_TRANSFER_BIT);
     tex_signal(gpu, cmd, dst, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    vk_unlock(gpu);
 }
 
 const struct pl_tex *pl_vulkan_wrap(const struct pl_gpu *gpu,
@@ -1124,8 +1163,10 @@ bool pl_vulkan_hold(const struct pl_gpu *gpu, const struct pl_tex *tex,
     pl_assert(!tex_vk->held);
     pl_assert(sem_out);
 
+    vk_lock(gpu);
     struct vk_cmd *cmd = vk_require_cmd(gpu, GRAPHICS);
     if (!cmd) {
+        vk_unlock(gpu);
         PL_ERR(gpu, "Failed holding external image!");
         return false;
     }
@@ -1137,6 +1178,7 @@ bool pl_vulkan_hold(const struct pl_gpu *gpu, const struct pl_tex *tex,
     vk_submit(gpu);
     tex_vk->held = vk_flush_commands(vk);
 
+    vk_unlock(gpu);
     return tex_vk->held;
 }
 
@@ -1359,9 +1401,11 @@ static void vk_buf_write(const struct pl_gpu *gpu, const struct pl_buf *buf,
         memcpy((void *) addr, data, size);
         buf_vk->needs_flush = true;
     } else {
+        vk_lock(gpu);
         struct vk_cmd *cmd = vk_require_cmd(gpu, buf_vk->update_queue);
         if (!cmd) {
             PL_ERR(gpu, "Failed updating buffer!");
+            vk_unlock(gpu);
             return;
         }
 
@@ -1397,6 +1441,7 @@ static void vk_buf_write(const struct pl_gpu *gpu, const struct pl_buf *buf,
 
         pl_assert(!buf->params.host_readable); // no flush needed due to this
         buf_signal(gpu, cmd, buf, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        vk_unlock(gpu);
     }
 }
 
@@ -1419,9 +1464,11 @@ static bool vk_buf_export(const struct pl_gpu *gpu, const struct pl_buf *buf)
     if (buf_vk->exported)
         return true;
 
+    vk_lock(gpu);
     struct vk_cmd *cmd = PL_DEF(p->cmd, vk_require_cmd(gpu, GRAPHICS));
     if (!cmd) {
         PL_ERR(gpu, "Failed exporting buffer!");
+        vk_unlock(gpu);
         return false;
     }
 
@@ -1431,7 +1478,10 @@ static bool vk_buf_export(const struct pl_gpu *gpu, const struct pl_buf *buf)
                 0, buf->params.size, true);
 
     vk_submit(gpu);
-    return vk_flush_commands(vk);
+    bool ret = vk_flush_commands(vk);
+    vk_unlock(gpu);
+
+    return ret;
 }
 
 static const struct pl_buf *vk_buf_create(const struct pl_gpu *gpu,
@@ -1581,15 +1631,19 @@ static bool vk_buf_poll(const struct pl_gpu *gpu, const struct pl_buf *buf,
     struct pl_buf_vk *buf_vk = buf->priv;
 
     // Opportunistically check if we can re-use this buffer without flush
+    vk_lock(gpu);
     vk_poll_commands(vk, 0);
-    if (buf_vk->refcount == 1)
+    if (buf_vk->refcount == 1) {
+        vk_unlock(gpu);
         return false;
+    }
 
     // Otherwise, we're force to submit all queued commands so that the
     // user is guaranteed to see progress eventually, even if they call
     // this in a tight loop
     vk_submit(gpu);
     vk_poll_commands(vk, timeout);
+    vk_unlock(gpu);
 
     return buf_vk->refcount > 1;
 }
@@ -1662,6 +1716,7 @@ static bool vk_tex_upload(const struct pl_gpu *gpu,
     bool emulated = tex->params.format->emulated;
     bool unaligned = params->buf_offset % 4 != 0;
 
+    vk_lock(gpu);
     if (emulated || unaligned) {
 
         // Copy the source data buffer into an intermediate buffer
@@ -1707,6 +1762,8 @@ static bool vk_tex_upload(const struct pl_gpu *gpu,
         fixed.buf = tbuf;
         fixed.buf_offset = 0;
 
+        // FIXME: p->dp is not thread safe!
+        vk_unlock(gpu);
         return emulated ? pl_tex_upload_texel(gpu, p->dp, &fixed)
                         : pl_tex_upload(gpu, &fixed);
 
@@ -1741,9 +1798,11 @@ static bool vk_tex_upload(const struct pl_gpu *gpu,
         tex_signal(gpu, cmd, tex, VK_PIPELINE_STAGE_TRANSFER_BIT);
     }
 
+    vk_unlock(gpu);
     return true;
 
 error:
+    vk_unlock(gpu);
     return false;
 }
 
@@ -1786,14 +1845,18 @@ static bool vk_tex_download(const struct pl_gpu *gpu,
         fixed.buf = tbuf;
         fixed.buf_offset = 0;
 
+        // FIXME: p->dp is not thread safe!
         bool ok = emulated ? pl_tex_download_texel(gpu, p->dp, &fixed)
                            : pl_tex_download(gpu, &fixed);
         if (!ok)
             goto error;
 
+        vk_lock(gpu);
         struct vk_cmd *cmd = vk_require_cmd(gpu, tex_vk->transfer_queue);
-        if (!cmd)
+        if (!cmd) {
+            vk_unlock(gpu);
             goto error;
+        }
 
         struct pl_buf_vk *tbuf_vk = tbuf->priv;
         VkBufferCopy region = {
@@ -1812,6 +1875,7 @@ static bool vk_tex_download(const struct pl_gpu *gpu,
         buf_signal(gpu, cmd, tbuf, VK_PIPELINE_STAGE_TRANSFER_BIT);
         buf_signal(gpu, cmd, buf, VK_PIPELINE_STAGE_TRANSFER_BIT);
         buf_flush(gpu, cmd, buf, params->buf_offset, size);
+        vk_unlock(gpu);
 
     } else {
 
@@ -1827,10 +1891,13 @@ static bool vk_tex_download(const struct pl_gpu *gpu,
             },
         };
 
+        vk_lock(gpu);
         enum queue_type queue = vk_img_copy_queue(gpu, &region, tex);
         struct vk_cmd *cmd = vk_require_cmd(gpu, queue);
-        if (!cmd)
+        if (!cmd) {
+            vk_unlock(gpu);
             goto error;
+        }
 
         buf_barrier(gpu, cmd, buf, VK_PIPELINE_STAGE_TRANSFER_BIT,
                     VK_ACCESS_TRANSFER_WRITE_BIT, params->buf_offset, size,
@@ -1843,6 +1910,7 @@ static bool vk_tex_download(const struct pl_gpu *gpu,
         buf_signal(gpu, cmd, buf, VK_PIPELINE_STAGE_TRANSFER_BIT);
         tex_signal(gpu, cmd, tex, VK_PIPELINE_STAGE_TRANSFER_BIT);
         buf_flush(gpu, cmd, buf, params->buf_offset, size);
+        vk_unlock(gpu);
     }
 
     return true;
@@ -2582,6 +2650,7 @@ static void vk_pass_run(const struct pl_gpu *gpu,
         vert_vk = vert->priv;
     }
 
+    vk_lock(gpu);
     if (!pass_vk->use_pushd) {
         // Wait for a free descriptor set
         while (!pass_vk->dmask) {
@@ -2592,8 +2661,10 @@ static void vk_pass_run(const struct pl_gpu *gpu,
     }
 
     struct vk_cmd *cmd = vk_require_cmd(gpu, types[pass->params.type]);
-    if (!cmd)
+    if (!cmd) {
+        vk_unlock(gpu);
         goto error;
+    }
 
     // Find a descriptor set to use
     VkDescriptorSet ds = VK_NULL_HANDLE;
@@ -2710,6 +2781,7 @@ static void vk_pass_run(const struct pl_gpu *gpu,
     // intra-frame granularity
     pl_assert(cmd == p->cmd); // make sure this is still the case
     vk_submit(gpu);
+    vk_unlock(gpu);
 
 error:
     return;
@@ -2860,6 +2932,7 @@ static bool vk_tex_export(const struct pl_gpu *gpu, const struct pl_tex *tex,
     struct pl_tex_vk *tex_vk = tex->priv;
     struct pl_sync_vk *sync_vk = sync->priv;
 
+    vk_lock(gpu);
     struct vk_cmd *cmd = p->cmd ? p->cmd : vk_require_cmd(gpu, GRAPHICS);
     if (!cmd)
         goto error;
@@ -2871,6 +2944,7 @@ static bool vk_tex_export(const struct pl_gpu *gpu, const struct pl_tex *tex,
     vk_submit(gpu);
     if (!vk_flush_commands(vk))
         goto error;
+    vk_unlock(gpu);
 
     // Remember the other dependency and hold on to the sync object
     pl_tex_vk_external_dep(gpu, tex, sync_vk->signal);
@@ -2879,6 +2953,7 @@ static bool vk_tex_export(const struct pl_gpu *gpu, const struct pl_tex *tex,
     return true;
 
 error:
+    vk_unlock(gpu);
     PL_ERR(gpu, "Failed exporting shared texture!");
     return false;
 }
@@ -2886,22 +2961,28 @@ error:
 static void vk_gpu_flush(const struct pl_gpu *gpu)
 {
     struct vk_ctx *vk = pl_vk_get(gpu);
+    vk_lock(gpu);
     vk_submit(gpu);
     vk_flush_commands(vk);
+    vk_unlock(gpu);
 }
 
 static void vk_gpu_finish(const struct pl_gpu *gpu)
 {
     struct vk_ctx *vk = pl_vk_get(gpu);
+    vk_lock(gpu);
     vk_submit(gpu);
     vk_wait_idle(vk);
+    vk_unlock(gpu);
 }
 
 struct vk_cmd *pl_vk_steal_cmd(const struct pl_gpu *gpu)
 {
     struct pl_vk *p = gpu->priv;
+    vk_lock(gpu);
     struct vk_cmd *cmd = vk_require_cmd(gpu, GRAPHICS);
     p->cmd = NULL;
+    vk_unlock(gpu);
     return cmd;
 }
 

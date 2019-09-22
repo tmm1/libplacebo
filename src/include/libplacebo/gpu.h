@@ -124,7 +124,7 @@ struct pl_gpu_limits {
 // Abstract device context which wraps an underlying graphics context and can
 // be used to dispatch rendering commands.
 //
-// Thread-safety: Unsafe
+// Thread-safety: Safe
 struct pl_gpu {
     struct pl_context *ctx;  // the `pl_context` this GPU was initialized from
     struct pl_gpu_fns *impl; // the underlying implementation (unique per GPU)

@@ -37,6 +37,8 @@ void vk_dev_callback(struct vk_ctx *vk, vk_cb callback,
 
 // Helper wrapper around command buffers that also track dependencies,
 // callbacks and synchronization primitives
+//
+// Thread-safety: Unsafe
 struct vk_cmd {
     struct vk_cmdpool *pool; // pool it was allocated from
     VkQueue queue;           // the submission queue (for recording/pending)
@@ -109,6 +111,8 @@ enum vk_wait_type vk_cmd_wait(struct vk_ctx *vk, struct vk_cmd *cmd,
 void vk_signal_destroy(struct vk_ctx *vk, struct vk_signal **sig);
 
 // Command pool / queue family hybrid abstraction
+//
+// Thread-safety: Safe (TODO)
 struct vk_cmdpool {
     VkQueueFamilyProperties props;
     int qf; // queue family index

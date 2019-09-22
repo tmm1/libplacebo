@@ -28,6 +28,7 @@ enum glsl_shader_stage {
 
 #define SPIRV_NAME_MAX_LEN 32
 
+// Thread-safety: Safe
 struct spirv_compiler {
     char name[SPIRV_NAME_MAX_LEN]; // for cache invalidation
     struct pl_context *ctx;
