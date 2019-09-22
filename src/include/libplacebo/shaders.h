@@ -26,6 +26,7 @@
 
 #include <libplacebo/gpu.h>
 
+// Thread-safety: Unsafe
 struct pl_shader;
 
 struct pl_shader_params {
@@ -207,6 +208,8 @@ const struct pl_shader_res *pl_shader_finalize(struct pl_shader *sh);
 // after them and passing them to the right shader passes.
 //
 // Note: pl_shader_obj pointers must be initialized to NULL by the caller.
+//
+// Thread-safety: Unsafe
 struct pl_shader_obj;
 
 void pl_shader_obj_destroy(struct pl_shader_obj **obj);

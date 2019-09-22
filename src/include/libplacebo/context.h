@@ -21,11 +21,17 @@
 #include "config.h"
 
 // Meta-object to serve as a global entrypoint for the purposes of resource
-// allocation, logging, etc.. Note on thread safety: the pl_context and
-// everything allocated from it are *not* thread-safe except where otherwise
-// noted. That is, multiple pl_context objects are safe to use from multiple
-// threads, but a single pl_context and all of its derived resources and
-// contexts must be used from a single thread at all times.
+// allocation, logging, etc.
+//
+// Thread-safety: Safe
+//
+// Note on thread safety: only objects specifically marked as "Safe" are thread
+// safe. For every other type of object, concurrent access to a single object
+// from multiple threads is undefined behavior.
+//
+// Concurrent object to *different* objects from different threads is allowed.
+// In the context of libplacebo, "accessing an object" means running any
+// function that takes this object as one of its arguments, even if read-only.
 struct pl_context;
 
 // The log level associated with a given log message.

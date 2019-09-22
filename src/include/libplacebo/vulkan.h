@@ -28,6 +28,8 @@
 #include <libplacebo/swapchain.h>
 
 // Structure representing a VkInstance. Using this is not required.
+//
+// Thread-safety: Unsafe
 struct pl_vk_inst {
     VkInstance instance;
     uint64_t priv;
@@ -66,6 +68,8 @@ const struct pl_vk_inst *pl_vk_inst_create(struct pl_context *ctx,
 void pl_vk_inst_destroy(const struct pl_vk_inst **inst);
 
 // Structure representing the actual vulkan device and associated GPU instance
+//
+// Thread-safety: Unsafe
 struct pl_vulkan {
     const struct pl_gpu *gpu;
     void *priv;

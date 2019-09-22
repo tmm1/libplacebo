@@ -25,6 +25,7 @@
 #include <libplacebo/shaders/sampling.h>
 #include <libplacebo/swapchain.h>
 
+// Thread-safety: Unsafe
 struct pl_renderer;
 
 // Creates a new renderer object, which is backed by a GPU context. This is a

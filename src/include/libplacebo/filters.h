@@ -261,6 +261,8 @@ struct pl_filter_params {
 // Represents an initialized instance of a particular filter, with a
 // precomputed LUT. The interpretation of the LUT depends on the type of the
 // filter (polar or separable).
+//
+// Thread-safety: Unsafe
 struct pl_filter {
     // Deep copy of the parameters, for convenience.
     struct pl_filter_params params;
