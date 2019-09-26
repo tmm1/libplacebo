@@ -229,34 +229,69 @@ const struct pl_vk_inst *pl_vk_inst_create(struct pl_context *ctx,
         pl_debug(ctx, "    %s", layers_avail[i].layerName);
 
     // Sorted by priority
-    static const char *debug_layers[] = {
+    static const char *debug_meta_layers[] = {
         "VK_LAYER_KHRONOS_validation",
         "VK_LAYER_LUNARG_standard_validation",
     };
 
+    static const char *debug_fallback_layers[] = {
+        "VK_LAYER_GOOGLE_threading",
+        "VK_LAYER_LUNARG_parameter_validation",
+        "VK_LAYER_LUNARG_object_tracker",
+        "VK_LAYER_LUNARG_core_validation",
+        "VK_LAYER_GOOGLE_unique_objects",
+    };
+
     bool debug = params->debug;
     if (debug) {
-        for (int i = 0; i < PL_ARRAY_SIZE(debug_layers); i++) {
+        for (int i = 0; i < PL_ARRAY_SIZE(debug_meta_layers); i++) {
             for (int n = 0; n < num_layers_avail; n++) {
-                if (strcmp(debug_layers[i], layers_avail[n].layerName) != 0)
+                if (strcmp(debug_meta_layers[i], layers_avail[n].layerName) != 0)
                     continue;
 
-                pl_info(ctx, "Enabling debug meta layer");
-                info.ppEnabledLayerNames = &debug_layers[i];
+                pl_info(ctx, "Enabling debug meta layer: %s", debug_meta_layers[i]);
+                info.ppEnabledLayerNames = &debug_meta_layers[i];
                 info.enabledLayerCount = 1;
-
-                // Enable support for debug callbacks, so we get useful messages
-                TARRAY_APPEND(tmp, exts, num_exts, VK_EXT_DEBUG_REPORT_EXTENSION_NAME);
                 goto layers_done;
             }
         }
 
-        // No layer found..
-        pl_warn(ctx, "API debugging requested but no debug meta layers present... ignoring");
+        pl_info(ctx, "No debug meta layers found (old/legacy vulkan SDK?)");
+
+        const char **layers = NULL;
+        int num_layers = 0;
+        for (int i = 0; i < PL_ARRAY_SIZE(debug_fallback_layers); i++) {
+            const char *layer = debug_fallback_layers[i];
+            for (int n = 0; n < num_layers_avail; n++) {
+                if (strcmp(layer, layers_avail[n].layerName) == 0) {
+                    TARRAY_APPEND(tmp, layers, num_layers, layer);
+                    break;
+                }
+
+            }
+        }
+
+        if (num_layers > 0) {
+            pl_info(ctx, "Enabling debug fallback layers:");
+            for (int i = 0; i < num_layers; i++)
+                pl_info(ctx, "    %s", layers[i]);
+            info.ppEnabledLayerNames = layers;
+            info.enabledLayerCount = num_layers;
+            goto layers_done;
+        }
+
+        // No layers found..
+        pl_warn(ctx, "API debugging requested but no debug layers present... ignoring");
         debug = false;
     }
 
 layers_done:
+
+    if (debug) {
+        // Enable support for debug callbacks, so we get useful messages
+        // FIXME: check this before going through the whole layer business
+        TARRAY_APPEND(tmp, exts, num_exts, VK_EXT_DEBUG_REPORT_EXTENSION_NAME);
+    }
 
     info.ppEnabledExtensionNames = exts;
     info.enabledExtensionCount = num_exts;
