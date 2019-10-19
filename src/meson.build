@@ -136,6 +136,11 @@ components = [
     'deps':  dependency('lcms2', version: '>=2.6', required: get_option('lcms')),
     'srcs': 'lcms.c',
   }, {
+    'name': 'libavutil',
+    'deps': dependency('libavutil', required: get_option('libav')),
+    'srcs': 'utils/libav.c',
+    'test': 'libav.c',
+  }, {
     'name': 'glslang',
     'deps': glslang_combined,
     'srcs': [ 'glsl/glslang.cc',

@@ -55,6 +55,10 @@
 #include "include/libplacebo/vulkan.h"
 #endif
 
+#if PL_HAVE_LIBAVUTIL
+#include "include/libplacebo/utils/libav.h"
+#endif
+
 #pragma GCC visibility pop
 
 // Align up to the nearest multiple of an arbitrary alignment, which may also
