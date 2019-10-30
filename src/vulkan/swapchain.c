@@ -471,8 +471,10 @@ static bool vk_sw_recreate(const struct pl_swapchain *sw, int w, int h)
     VkSwapchainCreateInfoKHR sinfo = p->protoInfo;
     sinfo.oldSwapchain = p->swapchain;
 
+    // Silently ignore swapchain info update failures, but return false
+    // nonetheless
     if (!update_swapchain_info(p, &sinfo, w, h))
-        goto error;
+        return false;
 
     PL_INFO(sw, "(Re)creating swapchain of size %dx%d",
             sinfo.imageExtent.width,
