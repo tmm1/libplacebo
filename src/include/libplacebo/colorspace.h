@@ -359,13 +359,47 @@ struct pl_matrix3x3 pl_get_rgb2xyz_matrix(const struct pl_raw_primaries *prim);
 // Similar to pl_get_rgb2xyz_matrix, but gives the inverse transformation.
 struct pl_matrix3x3 pl_get_xyz2rgb_matrix(const struct pl_raw_primaries *prim);
 
+// Different LMS models implemented in libplacebo. LMS colorspaces are used
+// for a number of colorspace operations dealing with human perception of
+// color, such as chromatic adaptation.
+enum pl_lms_model {
+    PL_LMS_AUTO = 0,
+
+    // Revised matrix from CIECAM97s, designed for a linear transform and
+    // normalized for equal energy on monochrome inputs. This is the default
+    // for libplacebo chromatic adaptation due to it being suited for
+    // linear color management operations.
+    PL_LMS_CAT97,
+
+    // The original CIECAM97s LMS matrix, as used in e.g. ICC profiles and
+    // commonly cited online. It's designed to be used with a non-linear von
+    // Kries transformation.
+    PL_LMS_BRADFORD,
+
+    // Hunt-Pointer-Estevez transformation matrix, also commonly called the
+    // "von Kries" matrix due to its original prevalence in the von Kries
+    // colorspace transformation method.
+    PL_LMS_HPE,
+
+    // Identity matrix, i.e. LMS = XYZ. Suboptimal.
+    PL_LMS_XYZ,
+
+    PL_LMS_COUNT,
+};
+
+// Calculate an XYZ->LMS conversion matrix with a given crosstalk parameter.
+// The crosstalk parameter can be used to improve the coding efficiency of
+// LMS-based color systems (such as IPT and ICtCp).
+struct pl_matrix3x3 pl_get_xyz2lms_matrix(enum pl_lms_model lms, float crosstalk);
+
 // Returns a primary adaptation matrix, which converts from one set of
 // primaries to another. This is an RGB->RGB transformation. For rendering
 // intents other than PL_INTENT_ABSOLUTE_COLORIMETRIC, the white point is
-// adapted using the Bradford matrix.
+// adapted using the indicated `pl_lms_model`, or `PL_LMS_CAT97` otherwise.
 struct pl_matrix3x3 pl_get_color_mapping_matrix(const struct pl_raw_primaries *src,
                                                 const struct pl_raw_primaries *dst,
-                                                enum pl_rendering_intent intent);
+                                                enum pl_rendering_intent intent,
+                                                enum pl_lms_model lms);
 
 // Cone types involved in human vision
 enum pl_cone {
@@ -383,9 +417,10 @@ enum pl_cone {
 
 // Structure describing parameters for simulating color blindness
 struct pl_cone_params {
-    enum pl_cone cones; // Which cones are *affected* by the vision model
-    float strength;     // Coefficient for how strong the defect is
-                        // (1.0 = Unaffected, 0.0 = Full blindness)
+    enum pl_cone cones;     // Which cones are *affected* by the vision model
+    float strength;         // Coefficient for how strong the defect is
+                            // (1.0 = Unaffected, 0.0 = Full blindness)
+    enum pl_lms_model lms;  // Which LMS model to use (defaults to PL_LMS_CAT97)
 };
 
 // Built-in color blindness models

@@ -201,6 +201,11 @@ struct pl_color_map_params {
     // Defaults to PL_INTENT_RELATIVE_COLORIMETRIC.
     enum pl_rendering_intent intent;
 
+    // The LMS<->XYZ model to use for chromatic adaptation, when the rendering
+    // intent is set to something other than absolute colorimetric.
+    // Default to PL_LMS_CAT97.
+    enum pl_lms_model lms_model;
+
     // Algorithm and configuration used for tone-mapping. For non-tunable
     // algorithms, the `param` is ignored. If the tone mapping parameter is
     // left as 0.0, the tone-mapping curve's preferred default parameter will

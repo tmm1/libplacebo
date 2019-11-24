@@ -110,6 +110,20 @@ void pl_shader_decode_color(struct pl_shader *sh, struct pl_color_repr *repr,
                                         : PL_COLOR_TRC_HLG;
 
         // Inverted from the matrix in the spec, transposed to column major
+        // Note: This is a hard-coded (and more precise) result of the
+        // following calculation:
+        //
+        //   lms2rgb = pl_get_xyz2lms(PL_LMS_HPE, 0.04);
+        //   rgb2xyz = pl_get_rgb2xyz_matrix(pl_raw_primaries_get(PL_COLOR_PRIM_BT_2020));
+        //   pl_matrix3x3_mul(&lms2rgb, &rgb2xyz);
+        //   pl_matrix3x3_invert(&lms2rgb);
+        //
+        // In theory this could be generalized to color primaries other than
+        // BT.2020, and used as such, but given the ITU-R labelling of the
+        // enum name, and the fact that the BT.2100 standard is explicitly only
+        // designed to be used with the BT.2020 primaries, we continue
+        // hard-coding this assumption.
+
         static const char *bt2100_lms2rgb = "mat3("
             "  3.43661,  -0.79133, -0.0259499, "
             " -2.50645,    1.9836, -0.0989137, "
@@ -679,6 +693,7 @@ bool pl_shader_detect_peak(struct pl_shader *sh,
 
 const struct pl_color_map_params pl_color_map_default_params = {
     .intent                 = PL_INTENT_RELATIVE_COLORIMETRIC,
+    .lms_model              = PL_LMS_CAT97,
     .tone_mapping_algo      = PL_TONE_MAPPING_HABLE,
     .desaturation_strength  = 0.75,
     .desaturation_exponent  = 1.50,
@@ -902,7 +917,8 @@ void pl_shader_color_map(struct pl_shader *sh,
         csp_src = pl_raw_primaries_get(src.primaries),
         csp_dst = pl_raw_primaries_get(dst.primaries);
         struct pl_matrix3x3 cms_mat;
-        cms_mat = pl_get_color_mapping_matrix(csp_src, csp_dst, params->intent);
+        cms_mat = pl_get_color_mapping_matrix(csp_src, csp_dst, params->intent,
+                                              params->lms_model);
         GLSL("color.rgb = %s * color.rgb;\n", sh_var(sh, (struct pl_shader_var) {
             .var = pl_var_mat3("cms_matrix"),
             .data = PL_TRANSPOSE_3X3(cms_mat.m),

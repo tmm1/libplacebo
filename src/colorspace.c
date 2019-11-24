@@ -559,23 +559,60 @@ struct pl_matrix3x3 pl_get_xyz2rgb_matrix(const struct pl_raw_primaries *prim)
     return out;
 }
 
-// LMS<-XYZ revised matrix from CIECAM97, based on a linear transform and
-// normalized for equal energy on monochrome inputs
 static const struct pl_matrix3x3 m_cat97 = {{
     {  0.8562,  0.3372, -0.1934 },
     { -0.8360,  1.8327,  0.0033 },
     {  0.0357, -0.0469,  1.0112 },
 }};
 
+static const struct pl_matrix3x3 m_bradford = {{
+    {  0.8951,  0.2664, -0.1614 },
+    { -0.7502,  1.7135,  0.0367 },
+    {  0.0389, -0.0685,  1.0296 },
+}};
+
+static const struct pl_matrix3x3 m_hpe = {{
+    {  0.40024, 0.70760, -0.08081 },
+    { -0.22630, 1.16532,  0.04570 },
+    {  0.00000, 0.00000,  0.91822 },
+}};
+
+static const struct pl_matrix3x3 *m_xyz2lms[PL_LMS_COUNT] = {
+    [PL_LMS_CAT97]      = &m_cat97,
+    [PL_LMS_BRADFORD]   = &m_bradford,
+    [PL_LMS_HPE]        = &m_hpe,
+    [PL_LMS_XYZ]        = &pl_matrix3x3_identity,
+};
+
+struct pl_matrix3x3 pl_get_xyz2lms_matrix(enum pl_lms_model lms, float crosstalk)
+{
+    float c = crosstalk;
+    struct pl_matrix3x3 m = {{
+        { 1 - 2*c,       c,       c },
+        {       c, 1 - 2*c,       c },
+        {       c,       c, 1 - 2*c },
+    }};
+
+    lms = PL_DEF(lms, PL_LMS_CAT97);
+    pl_assert(lms > 0 && lms < PL_LMS_COUNT);
+    pl_matrix3x3_mul(&m, m_xyz2lms[lms]);
+    return m;
+}
+
 // M := M * XYZd<-XYZs
 static void apply_chromatic_adaptation(struct pl_cie_xy src,
                                        struct pl_cie_xy dest,
+                                       enum pl_lms_model lms,
                                        struct pl_matrix3x3 *mat)
 {
     // If the white points are nearly identical, this is a wasteful identity
     // operation.
     if (fabs(src.x - dest.x) < 1e-6 && fabs(src.y - dest.y) < 1e-6)
         return;
+
+    lms = PL_DEF(lms, PL_LMS_CAT97);
+    pl_assert(lms > 0 && lms < PL_LMS_COUNT);
+    const struct pl_matrix3x3 *m_lms = m_xyz2lms[lms];
 
     // XYZd<-XYZs = Ma^-1 * (I*[Cd/Cs]) * Ma
     // http://www.brucelindbloom.com/index.html?Eqn_ChromAdapt.html
@@ -584,14 +621,14 @@ static void apply_chromatic_adaptation(struct pl_cie_xy src,
 
     for (int i = 0; i < 3; i++) {
         // source cone
-        C[i][0] = m_cat97.m[i][0] * pl_cie_X(src)
-                + m_cat97.m[i][1] * 1
-                + m_cat97.m[i][2] * pl_cie_Z(src);
+        C[i][0] = m_lms->m[i][0] * pl_cie_X(src)
+                + m_lms->m[i][1] * 1
+                + m_lms->m[i][2] * pl_cie_Z(src);
 
         // dest cone
-        C[i][1] = m_cat97.m[i][0] * pl_cie_X(dest)
-                + m_cat97.m[i][1] * 1
-                + m_cat97.m[i][2] * pl_cie_Z(dest);
+        C[i][1] = m_lms->m[i][0] * pl_cie_X(dest)
+                + m_lms->m[i][1] * 1
+                + m_lms->m[i][2] * pl_cie_Z(dest);
     }
 
     // tmp := I * [Cd/Cs] * Ma
@@ -599,10 +636,10 @@ static void apply_chromatic_adaptation(struct pl_cie_xy src,
     for (int i = 0; i < 3; i++)
         tmp.m[i][i] = C[i][1] / C[i][0];
 
-    pl_matrix3x3_mul(&tmp, &m_cat97);
+    pl_matrix3x3_mul(&tmp, m_lms);
 
     // M := M * Ma^-1 * tmp
-    struct pl_matrix3x3 ma_inv = m_cat97;
+    struct pl_matrix3x3 ma_inv = *m_lms;
     pl_matrix3x3_invert(&ma_inv);
     pl_matrix3x3_mul(mat, &ma_inv);
     pl_matrix3x3_mul(mat, &tmp);
@@ -621,8 +658,11 @@ const struct pl_cone_params pl_vision_achromatopsia = {PL_CONE_LMS,  0.0};
 struct pl_matrix3x3 pl_get_cone_matrix(const struct pl_cone_params *params,
                                        const struct pl_raw_primaries *prim)
 {
+    enum pl_lms_model lms = PL_DEF(params->lms, PL_LMS_CAT97);
+    pl_assert(lms > 0 && lms < PL_LMS_COUNT);
+
     // LMS<-RGB := LMS<-XYZ * XYZ<-RGB
-    struct pl_matrix3x3 rgb2lms = m_cat97;
+    struct pl_matrix3x3 rgb2lms = *m_xyz2lms[lms];
     struct pl_matrix3x3 rgb2xyz = pl_get_rgb2xyz_matrix(prim);
     pl_matrix3x3_mul(&rgb2lms, &rgb2xyz);
 
@@ -754,7 +794,8 @@ struct pl_matrix3x3 pl_get_cone_matrix(const struct pl_cone_params *params,
 
 struct pl_matrix3x3 pl_get_color_mapping_matrix(const struct pl_raw_primaries *src,
                                                 const struct pl_raw_primaries *dst,
-                                                enum pl_rendering_intent intent)
+                                                enum pl_rendering_intent intent,
+                                                enum pl_lms_model lms)
 {
     // In saturation mapping, we don't care about accuracy and just want
     // primaries to map to primaries, making this an identity transformation.
@@ -771,7 +812,7 @@ struct pl_matrix3x3 pl_get_color_mapping_matrix(const struct pl_raw_primaries *s
 
     // Chromatic adaptation, except in absolute colorimetric intent
     if (intent != PL_INTENT_ABSOLUTE_COLORIMETRIC)
-        apply_chromatic_adaptation(src->white, dst->white, &xyz2rgb_d);
+        apply_chromatic_adaptation(src->white, dst->white, lms, &xyz2rgb_d);
 
     // XYZs<-RGBs
     struct pl_matrix3x3 rgb2xyz_s = pl_get_rgb2xyz_matrix(src);

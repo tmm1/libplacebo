@@ -104,8 +104,8 @@ int main()
 
     // Make sure the gamut mapping round-trips
     struct pl_matrix3x3 bt709_bt2020, bt2020_bt709;
-    bt709_bt2020 = pl_get_color_mapping_matrix(bt709, bt2020, PL_INTENT_RELATIVE_COLORIMETRIC);
-    bt2020_bt709 = pl_get_color_mapping_matrix(bt2020, bt709, PL_INTENT_RELATIVE_COLORIMETRIC);
+    bt709_bt2020 = pl_get_color_mapping_matrix(bt709, bt2020, PL_INTENT_RELATIVE_COLORIMETRIC, PL_LMS_AUTO);
+    bt2020_bt709 = pl_get_color_mapping_matrix(bt2020, bt709, PL_INTENT_RELATIVE_COLORIMETRIC, PL_LMS_AUTO);
     for (int n = 0; n < 10; n++) {
         float vec[3] = { RANDOM, RANDOM, RANDOM };
         float dst[3] = { vec[0],    vec[1],    vec[2]    };
@@ -160,7 +160,9 @@ int main()
     bt709_d50.white = (struct pl_cie_xy) { 0.34567, 0.35850 };
 
     struct pl_matrix3x3 d50_d65;
-    d50_d65 = pl_get_color_mapping_matrix(&bt709_d50, bt709, PL_INTENT_RELATIVE_COLORIMETRIC);
+    d50_d65 = pl_get_color_mapping_matrix(&bt709_d50, bt709,
+                                          PL_INTENT_RELATIVE_COLORIMETRIC,
+                                          PL_LMS_AUTO);
 
     float white[3] = { 1.0, 1.0, 1.0 };
     pl_matrix3x3_apply(&d50_d65, white);
