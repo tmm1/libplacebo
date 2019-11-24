@@ -33,6 +33,7 @@ enum pl_color_system {
     PL_COLOR_SYSTEM_BT_2020_C,   // ITU-R Rec. BT.2020 (constant luminance)
     PL_COLOR_SYSTEM_BT_2100_PQ,  // ITU-R Rec. BT.2100 ICtCp PQ variant
     PL_COLOR_SYSTEM_BT_2100_HLG, // ITU-R Rec. BT.2100 ICtCp HLG variant
+    PL_COLOR_SYSTEM_DOLBY_IPT,   // Dolby Vision Profile 5 IPT (similar to ICtCp)
     PL_COLOR_SYSTEM_YCGCO,       // YCgCo (derived from RGB)
     // Other color systems:
     PL_COLOR_SYSTEM_RGB,         // Red, Green and Blue

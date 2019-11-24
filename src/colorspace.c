@@ -33,6 +33,7 @@ bool pl_color_system_is_ycbcr_like(enum pl_color_system sys)
     case PL_COLOR_SYSTEM_BT_2020_C:
     case PL_COLOR_SYSTEM_BT_2100_PQ:
     case PL_COLOR_SYSTEM_BT_2100_HLG:
+    case PL_COLOR_SYSTEM_DOLBY_IPT:
     case PL_COLOR_SYSTEM_YCGCO:
         return true;
     case PL_COLOR_SYSTEM_COUNT: break;
@@ -55,6 +56,7 @@ bool pl_color_system_is_linear(enum pl_color_system sys)
     case PL_COLOR_SYSTEM_BT_2020_C:
     case PL_COLOR_SYSTEM_BT_2100_PQ:
     case PL_COLOR_SYSTEM_BT_2100_HLG:
+    case PL_COLOR_SYSTEM_DOLBY_IPT:
     case PL_COLOR_SYSTEM_XYZ:
         return false;
     case PL_COLOR_SYSTEM_COUNT: break;
@@ -878,6 +880,14 @@ struct pl_transform3x3 pl_color_repr_decode(struct pl_color_repr *repr,
             {17933/4096., -17390/4096., -543/4096.},
         }};
         pl_matrix3x3_invert(&m);
+        break;
+    case PL_COLOR_SYSTEM_DOLBY_IPT:
+        // FIXME: tune this based on SEI information?
+        m = (struct pl_matrix3x3) {{
+            {1.0,  0.1952,  0.4104},
+            {1.0, -0.2278,  0.2264},
+            {1.0,  0.0652, -1.3538},
+        }};
         break;
     case PL_COLOR_SYSTEM_YCGCO:
         m = (struct pl_matrix3x3) {{

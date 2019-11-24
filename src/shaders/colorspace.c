@@ -135,6 +135,21 @@ void pl_shader_decode_color(struct pl_shader *sh, struct pl_color_repr *repr,
         break;
     }
 
+    case PL_COLOR_SYSTEM_DOLBY_IPT: {
+        // Similar to ICtCp above, but with a proprietary matrix. The code
+        // to generate this is identical, but with the crosstalk factor
+        // set to 0.02 (instead of 0.04).
+        static const char *dvipt_lms2rgb = "mat3("
+            " 3.238998, -0.719461, -0.002862, "
+            "-2.272734,  1.874998, -0.268066, "
+            " 0.086733, -0.158947,  1.074494) ";
+
+        pl_shader_linearize(sh, PL_COLOR_TRC_PQ);
+        GLSL("color.rgb = %s * color.rgb; \n", dvipt_lms2rgb);
+        pl_shader_delinearize(sh, PL_COLOR_TRC_PQ);
+        break;
+    }
+
     case PL_COLOR_SYSTEM_XYZ:
         break; // no special post-processing needed
 
