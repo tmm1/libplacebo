@@ -57,6 +57,20 @@ enum pl_hook_flags {
     PL_HOOK_STATUS_SAVE      = 1 << 1,  // If true, run the `save` function
 };
 
+// Struct encapsulating a texture + metadata on how to use it
+struct pl_hook_tex {
+    // The actual texture object itself. This is owned by the renderer, and
+    // users may expect its contents to remain untouched for the duration
+    // of a frame, but not between frames.
+    const struct pl_tex *tex;
+
+    // The effective src rect we're interested in sampling from.
+    struct pl_rect2df src_rect;
+
+    // The effective representation of the color in this texture.
+    struct pl_color_repr repr;
+};
+
 struct pl_hook_params {
     const struct pl_gpu *gpu;
     enum pl_hook_stage stage;   // Which stage triggered the hook
@@ -69,13 +83,8 @@ struct pl_hook_params {
     struct pl_shader *sh;
 
     // When the signature is `PL_SHADER_SIG_NONE`, the user may instead sample
-    // from this texture.
-    //
-    // Note on ownership and lifetime: This `tex` is owned by the renderer and
-    // guaranteed to remain valid and unmodified by the renderer for the
-    // remainder of the pass, but no effort is made to preserve its contents
-    // across frames. Users must not modify this texture in any way.
-    const struct pl_tex *tex;
+    // from this texture. (Otherwise, this struct is {0})
+    struct pl_hook_tex tex;
 
     // The current effective colorspace and representation, of either the
     // pre-sampled color (in `sh`), or the contents of `tex`, respectively.
@@ -83,7 +92,7 @@ struct pl_hook_params {
     struct pl_color_space color;
     int components;
 
-    // The (cropped) source and destination rectangles of the rendering step.
+    // The (cropped) source and destination rectangles of the overall rendering.
     struct pl_rect2df src_rect;
     struct pl_rect2d dst_rect;
 };
@@ -96,7 +105,7 @@ struct pl_save_params {
 
     // The output of the `hook` function's shader, after execution. The same
     // lifetime rules apply as for `pl_hook_params.tex`.
-    const struct pl_tex *tex;
+    struct pl_hook_tex tex;
 };
 
 struct pl_hook {

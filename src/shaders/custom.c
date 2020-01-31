@@ -75,7 +75,7 @@ struct custom_shader_hook {
     int threads_w, threads_h;   // How many threads form a WG
 };
 
-struct named_tex {
+struct custom_shader_tex {
     struct bstr name;
     const struct pl_tex *tex;
 };
@@ -354,9 +354,9 @@ static bool parse_hook(struct pl_context *ctx, struct bstr *body,
 }
 
 static bool parse_tex(const struct pl_gpu *gpu, struct bstr *body,
-                      struct named_tex *out)
+                      struct custom_shader_tex *out)
 {
-    *out = (struct named_tex) {
+    *out = (struct custom_shader_tex) {
         .name = bstr0("USER_TEX"),
     };
 
@@ -531,7 +531,7 @@ static bool parse_tex(const struct pl_gpu *gpu, struct bstr *body,
 // valid shader block parsed.
 static bool parse_user_shader(const struct pl_gpu *gpu, struct bstr shader, void *priv,
                               bool (*dohook)(void *p, struct custom_shader_hook hook),
-                              bool (*dotex)(void *p, struct named_tex tex))
+                              bool (*dotex)(void *p, struct custom_shader_tex tex))
 {
     if (!shader.len)
         return false;
@@ -549,7 +549,7 @@ static bool parse_user_shader(const struct pl_gpu *gpu, struct bstr shader, void
     {
         // Peek at the first header to dispatch the right type
         if (bstr_startswith0(shader, "//!TEXTURE")) {
-            struct named_tex t;
+            struct custom_shader_tex t;
             if (!parse_tex(gpu, &shader, &t) || !dotex(priv, t))
                 return false;
             continue;
@@ -638,6 +638,11 @@ struct hook_pass {
     struct custom_shader_hook hook;
 };
 
+struct pass_tex {
+    struct bstr name;
+    struct pl_hook_tex tex;
+};
+
 struct hook_priv {
     struct pl_context *ctx;
     const struct pl_gpu *gpu;
@@ -647,12 +652,12 @@ struct hook_priv {
     int num_hook_passes;
 
     // Fixed (for shader-local textures)
-    struct named_tex *lut_textures;
+    struct custom_shader_tex *lut_textures;
     int num_lut_textures;
 
     // Dynamic per pass
     enum pl_hook_stage save_stages;
-    struct named_tex *pass_textures;
+    struct pass_tex *pass_textures;
     int num_pass_textures;
 
     // State for PRNG/frame count
@@ -678,9 +683,9 @@ static bool lookup_tex(void *priv, struct bstr var, float size[2])
     const struct pl_hook_params *params = ctx->params;
 
     if (bstr_equals0(var, "HOOKED")) {
-        pl_assert(params->tex);
-        size[0] = params->tex->params.w;
-        size[1] = params->tex->params.h;
+        pl_assert(params->tex.tex);
+        size[0] = params->tex.tex->params.w;
+        size[1] = params->tex.tex->params.h;
         return true;
     }
 
@@ -698,7 +703,7 @@ static bool lookup_tex(void *priv, struct bstr var, float size[2])
 
     for (int i = 0; i < p->num_pass_textures; i++) {
         if (bstr_equals(var, p->pass_textures[i].name)) {
-            const struct pl_tex *tex = p->pass_textures[i].tex;
+            const struct pl_tex *tex = p->pass_textures[i].tex.tex;
             size[0] = tex->params.w;
             size[1] = tex->params.h;
             return true;
@@ -713,20 +718,58 @@ static double prng_step(uint64_t *prng_state)
     abort(); // TODO
 }
 
+static bool bind_hook_tex(struct pl_shader *sh, struct bstr name,
+                          const struct pl_hook_tex *htex)
+{
+    ident_t id, pos, size, pt;
+    id = sh_bind(sh, htex->tex, "hook_tex", &htex->src_rect, &pos, &size, &pt);
+    if (!id)
+        return false;
+
+    GLSLH("#define %.*s_raw %s \n", BSTR_P(name), id);
+    GLSLH("#define %.*s_pos %s \n", BSTR_P(name), pos);
+    GLSLH("#define %.*s_size %s \n", BSTR_P(name), size);
+    GLSLH("#define %.*s_pt %s \n", BSTR_P(name), pt);
+
+    double off[2] = { htex->src_rect.x0, htex->src_rect.y0 };
+    GLSLH("#define %.*s_off %s \n", BSTR_P(name), sh_var(sh, (struct pl_shader_var) {
+        .var = pl_var_vec2("offset"),
+        .data = off,
+    }));
+
+    struct pl_color_repr repr = htex->repr;
+    float scale = pl_color_repr_normalize(&repr);
+    GLSLH("#define %.*s_mul %f \n", BSTR_P(name), scale);
+
+    // TODO: implement tex_map
+
+    // Compatibility with mpv
+    GLSLH("#define %.*s_rot mat2(1.0, 0.0, 0.0, 1.0) \n", BSTR_P(name));
+
+    // Sampling function boilerplate
+    GLSLH("#define %.*s_tex(pos) (%f * vec4(texture(%s, pos))) \n",
+          BSTR_P(name), scale, id);
+    GLSLH("#define %.*s_texOff(off) (%.*s_tex(%s + %s * vec2(off))) \n",
+          BSTR_P(name), BSTR_P(name), pos, pt);
+
+    return true;
+}
+
 static int hook_hook(void *priv, const struct pl_hook_params *params)
 {
     struct hook_priv *p = priv;
+    struct bstr stage = pl_stage_to_mp(params->stage);
 
     // Save the input texture if needed, but only once per hook
     if (!params->count && (p->save_stages & params->stage)) {
-        pl_assert(params->tex);
-        struct named_tex ntex = {
-            .name = pl_stage_to_mp(params->stage),
+        pl_assert(params->tex.tex);
+        struct pass_tex ptex = {
+            .name = stage,
             .tex = params->tex,
         };
 
-        PL_TRACE(p, "Saving input texture '%.*s' for binding", BSTR_P(ntex.name));
-        TARRAY_APPEND(p->tactx, p->pass_textures, p->num_pass_textures, ntex);
+        PL_TRACE(p, "Saving input texture '%.*s' for binding", BSTR_P(ptex.name));
+        TARRAY_APPEND(p->tactx, p->pass_textures, p->num_pass_textures, ptex);
     }
 
     int total_count = 0;
@@ -793,36 +836,86 @@ static int hook_hook(void *priv, const struct pl_hook_params *params)
         return -1;
     }
 
-    // TODO: bind input descriptors
+    for (int i = 0; i < PL_ARRAY_SIZE(hook->bind_tex); i++) {
+        struct bstr texname = hook->bind_tex[i];
+        if (!texname.start)
+            break;
+
+        if (bstr_equals0(texname, "HOOKED")) {
+            if (!bind_hook_tex(sh, stage, &params->tex))
+                return -1;
+            GLSLH("#define HOOKED_raw %.*s_raw \n", BSTR_P(stage));
+            GLSLH("#define HOOKED_pos %.*s_pos \n", BSTR_P(stage));
+            GLSLH("#define HOOKED_size %.*s_size \n", BSTR_P(stage));
+            GLSLH("#define HOOKED_rot %.*s_rot \n", BSTR_P(stage));
+            GLSLH("#define HOOKED_off %.*s_off \n", BSTR_P(stage));
+            GLSLH("#define HOOKED_pt %.*s_pt \n", BSTR_P(stage));
+            GLSLH("#define HOOKED_map %.*s_map \n", BSTR_P(stage));
+            GLSLH("#define HOOKED_mul %.*s_mul \n", BSTR_P(stage));
+            GLSLH("#define HOOKED_tex %.*s_tex \n", BSTR_P(stage));
+            GLSLH("#define HOOKED_texOff %.*s_texOff \n", BSTR_P(stage));
+            goto next_bind;
+        }
+
+        for (int j = 0; j < p->num_lut_textures; j++) {
+            if (bstr_equals(texname, p->lut_textures[i].name)) {
+                // Directly bind this, no need to bother with all the
+                // `bind_hook_tex` boilerplate
+                ident_t id = sh_desc(sh, (struct pl_shader_desc) {
+                    .desc = {
+                        .name = "hook_lut",
+                        .type = PL_DESC_SAMPLED_TEX,
+                    },
+                    .object = p->lut_textures[i].tex,
+                });
+                GLSLH("#define %.*s %s \n", BSTR_P(texname), id);
+                goto next_bind;
+            }
+        }
+
+        for (int j = 0; j < p->num_pass_textures; j++) {
+            if (bstr_equals(texname, p->pass_textures[i].name)) {
+                if (!bind_hook_tex(sh, texname, &p->pass_textures[i].tex))
+                    return -1;
+                goto next_bind;
+            }
+        }
+
+next_bind: ; // outer 'continue'
+    }
 
     // Set up the input variables
     p->frame_count++;
-    GLSLH("#define frame %s\n", sh_var(sh, (struct pl_shader_var) {
+    GLSLH("#define frame %s \n", sh_var(sh, (struct pl_shader_var) {
         .var = pl_var_int("frame"),
         .data = &p->frame_count,
         .dynamic = true,
     }));
 
     double random = prng_step(&p->prng_state);
-    GLSLH("#define random %s\n", sh_var(sh, (struct pl_shader_var) {
+    GLSLH("#define random %s \n", sh_var(sh, (struct pl_shader_var) {
         .var = pl_var_float("random"),
         .data = &random,
         .dynamic = true,
     }));
 
     double src_size[2] = { pl_rect_w(params->src_rect), pl_rect_h(params->src_rect) };
-    GLSLH("#define input_size %s\n", sh_var(sh, (struct pl_shader_var) {
+    GLSLH("#define input_size %s \n", sh_var(sh, (struct pl_shader_var) {
         .var = pl_var_vec2("input_size"),
         .data = src_size,
     }));
 
     double dst_size[2] = { pl_rect_w(params->dst_rect), pl_rect_h(params->dst_rect) };
-    GLSLH("#define target_size %s\n", sh_var(sh, (struct pl_shader_var) {
+    GLSLH("#define target_size %s \n", sh_var(sh, (struct pl_shader_var) {
         .var = pl_var_vec2("target_size"),
         .data = dst_size,
     }));
 
-    // TODO: tex_offset
+    double tex_off[2] = { params->tex.src_rect.x0, params->tex.src_rect.y0 };
+    GLSLH("#define tex_offset %s \n", sh_var(sh, (struct pl_shader_var) {
+        .var = pl_var_vec2("tex_offset"),
+        .data = tex_off,
+    }));
 
     // Load the user shader itself
     pl_shader_append_bstr(sh, SH_BUF_HEADER, hook->pass_body);
@@ -867,15 +960,15 @@ static void hook_save(void *priv, const struct pl_save_params *params)
     pl_assert(pass);
     pl_assert(pass->hook.save_tex.start);
 
-    struct named_tex ntex = {
+    struct pass_tex ptex = {
         .name = pass->hook.save_tex,
         .tex = params->tex,
     };
 
     PL_TRACE(p, "Saving output texture '%.*s' from hook execution on '%.*s'",
-             BSTR_P(ntex.name), BSTR_P(pl_stage_to_mp(params->stage)));
+             BSTR_P(ptex.name), BSTR_P(pl_stage_to_mp(params->stage)));
 
-    TARRAY_APPEND(p->tactx, p->pass_textures, p->num_pass_textures, ntex);
+    TARRAY_APPEND(p->tactx, p->pass_textures, p->num_pass_textures, ptex);
 }
 
 static bool register_hook(void *priv, struct custom_shader_hook hook)
@@ -899,7 +992,7 @@ static bool register_hook(void *priv, struct custom_shader_hook hook)
     return true;
 }
 
-static bool register_tex(void *priv, struct named_tex tex)
+static bool register_tex(void *priv, struct custom_shader_tex tex)
 {
     struct hook_priv *p = priv;
 
