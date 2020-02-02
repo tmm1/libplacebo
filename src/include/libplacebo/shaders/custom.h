@@ -41,20 +41,35 @@ enum pl_hook_stage {
     PL_HOOK_ALPHA_SCALED    = 1 << 6,
 
     PL_HOOK_NATIVE          = 1 << 7,  // Combined image in its native color space
-    PL_HOOK_RGB             = 1 << 8,  // After conversion to RGB, before overlays (resizable)
-    PL_HOOK_RGB_OVERLAY     = 1 << 9,  // After conversion to RGB, with overlays (resizable)
-    PL_HOOK_LINEAR          = 1 << 10, // After linearization but before scaling
-    PL_HOOK_SIGMOID         = 1 << 11, // After sigmoidization
-    PL_HOOK_PREKERNEL       = 1 << 12, // Immediately before the main scaler kernel
+    PL_HOOK_RGB             = 1 << 8,  // After conversion to RGB (resizable)
+    PL_HOOK_LINEAR          = 1 << 9,  // After linearization but before scaling
+    PL_HOOK_SIGMOID         = 1 << 10, // After sigmoidization
+    PL_HOOK_PRE_OVERLAY     = 1 << 11, // Before applying on-image overlays
+    PL_HOOK_PREKERNEL       = 1 << 12, // Immediately before the main scaler kernel (after overlays)
     PL_HOOK_POSTKERNEL      = 1 << 13, // Immediately after the main scaler kernel
     PL_HOOK_SCALED          = 1 << 14, // After scaling, before color management
     PL_HOOK_OUTPUT          = 1 << 15, // After color management, before dithering
 };
 
+// Returns true if a given hook stage is resizable
+static inline bool pl_hook_stage_resizable(enum pl_hook_stage stage) {
+    switch (stage) {
+    case PL_HOOK_RGB_INPUT:
+    case PL_HOOK_LUMA_INPUT:
+    case PL_HOOK_CHROMA_INPUT:
+    case PL_HOOK_ALPHA_INPUT:
+    case PL_HOOK_XYZ_INPUT:
+    case PL_HOOK_RGB:
+        return true;
+    default:
+        return false;
+    }
+}
+
 // Return flags for the `hook` function, indicating what the caller should do.
 enum pl_hook_flags {
-    PL_HOOK_STATUS_AGAIN     = 1 << 0,  // If true, the same hook is run again
-    PL_HOOK_STATUS_SAVE      = 1 << 1,  // If true, run the `save` function
+    PL_HOOK_STATUS_AGAIN     = 1 << 0,  // If set, the same hook is run again
+    PL_HOOK_STATUS_SAVE      = 1 << 1,  // If set, run the `save` function
 };
 
 // Struct encapsulating a texture + metadata on how to use it
@@ -64,7 +79,7 @@ struct pl_hook_tex {
     // of a frame, but not between frames.
     const struct pl_tex *tex;
 
-    // The effective src rect we're interested in sampling from.
+    // The effective src rect of this specific texture.
     struct pl_rect2df src_rect;
 
     // The effective representation of the color in this texture.
@@ -85,6 +100,11 @@ struct pl_hook_params {
     // When the signature is `PL_SHADER_SIG_NONE`, the user may instead sample
     // from this texture. (Otherwise, this struct is {0})
     struct pl_hook_tex tex;
+
+    // The effective current rectangle of the image we're rendering in this
+    // shader, which may be modified by the hook (except for non-resizable
+    // stages)
+    struct pl_rect2df *rect;
 
     // The current effective colorspace and representation, of either the
     // pre-sampled color (in `sh`), or the contents of `tex`, respectively.

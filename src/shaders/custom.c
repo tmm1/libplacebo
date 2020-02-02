@@ -61,7 +61,7 @@ struct custom_shader_hook {
 
     // Shader body itself + metadata
     struct bstr pass_body;
-    struct pl_transform2x2 offset;
+    float offset[2];
     int components;
 
     // Special expressions governing the output size and execution conditions
@@ -225,7 +225,6 @@ static bool parse_hook(struct pl_context *ctx, struct bstr *body,
 {
     *out = (struct custom_shader_hook){
         .pass_desc = bstr0("(unknown)"),
-        .offset = pl_transform2x2_identity,
         .width = {{ SZEXP_VAR_W, { .varname = bstr0("HOOKED") }}},
         .height = {{ SZEXP_VAR_H, { .varname = bstr0("HOOKED") }}},
         .cond = {{ SZEXP_CONST, { .cval = 1.0 }}},
@@ -282,8 +281,8 @@ static bool parse_hook(struct pl_context *ctx, struct bstr *body,
                 pl_err(ctx, "Error while parsing OFFSET!");
                 return false;
             }
-            out->offset.c[0] = ox;
-            out->offset.c[1] = oy;
+            out->offset[0] = ox;
+            out->offset[1] = oy;
             continue;
         }
 
@@ -586,7 +585,7 @@ static enum pl_hook_stage mp_stage_to_pl(struct bstr stage)
     if (bstr_equals0(stage, "MAINPRESUB"))
         return PL_HOOK_RGB;
     if (bstr_equals0(stage, "MAIN"))
-        return PL_HOOK_RGB_OVERLAY;
+        return PL_HOOK_PRE_OVERLAY; // Note: This is not quite the same thing
 
     if (bstr_equals0(stage, "LINEAR"))
         return PL_HOOK_LINEAR;
@@ -619,10 +618,10 @@ static struct bstr pl_stage_to_mp(enum pl_hook_stage stage)
 
     case PL_HOOK_NATIVE:        return bstr0("NATIVE");
     case PL_HOOK_RGB:           return bstr0("MAINPRESUB");
-    case PL_HOOK_RGB_OVERLAY:   return bstr0("MAIN");
 
     case PL_HOOK_LINEAR:        return bstr0("LINEAR");
     case PL_HOOK_SIGMOID:       return bstr0("SIGMOID");
+    case PL_HOOK_PRE_OVERLAY:   return bstr0("MAIN"); // Note: See above
     case PL_HOOK_PREKERNEL:     return bstr0("PREKERNEL");
     case PL_HOOK_POSTKERNEL:    return bstr0("POSTKERNEL");
 
@@ -808,8 +807,7 @@ static int hook_hook(void *priv, const struct pl_hook_params *params)
     int ret = 0;
 
     PL_TRACE(p, "Executing hook pass %d/%d on stage '%.*s': %.*s",
-             params->count, total_count,
-             BSTR_P(pl_stage_to_mp(params->stage)), BSTR_P(hook->pass_desc));
+             params->count, total_count, BSTR_P(stage), BSTR_P(hook->pass_desc));
 
     struct szexp_ctx scope = {
         .priv = p,
@@ -921,7 +919,7 @@ next_bind: ; // outer 'continue'
         .data = dst_size,
     }));
 
-    double tex_off[2] = { params->tex.src_rect.x0, params->tex.src_rect.y0 };
+    double tex_off[2] = { params->rect->x0, params->rect->y0 };
     GLSLH("#define tex_offset %s \n", sh_var(sh, (struct pl_shader_var) {
         .var = pl_var_vec2("tex_offset"),
         .data = tex_off,
@@ -936,7 +934,18 @@ next_bind: ; // outer 'continue'
         GLSL("vec4 color = hook(); \n");
     }
 
-    // TODO: apply transform or something
+    // Update the rendering rect based on the given `offset`
+    float sx = out_size[0] / pl_rect_w(*params->rect),
+          sy = out_size[1] / pl_rect_h(*params->rect),
+          x0 = sx * params->rect->x0 + hook->offset[0],
+          y0 = sy * params->rect->y0 + hook->offset[1];
+
+    *params->rect = (struct pl_rect2df) {
+        x0,
+        y0,
+        x0 + out_size[0],
+        y0 + out_size[1],
+    };
 
     if (hook->save_tex.start)
         ret |= PL_HOOK_STATUS_SAVE;

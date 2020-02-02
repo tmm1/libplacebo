@@ -532,6 +532,134 @@ static void draw_overlays(struct pl_renderer *rr, const struct pl_tex *fbo,
     }
 }
 
+static void pass_opt_hook_point(struct pl_renderer *rr, struct pass_state *pass,
+                                enum pl_hook_stage stage,
+                                const struct pl_render_params *params)
+{
+    if (!rr->fbofmt || rr->disable_hooks)
+        return;
+
+    const struct pl_tex *cur_tex = NULL;
+    struct img *cur_img = &pass->cur_img;
+
+    for (int i = 0; i < params->num_hooks; i++) {
+        const struct pl_hook *hook = params->hooks[i];
+        if (!(hook->stages & stage))
+            continue;
+
+        int count = 0;
+
+repeat_hook:
+
+        PL_TRACE(rr, "Dispatching hook: idx %d count %d stage 0x%x", i, count, stage);
+        struct pl_hook_params hparams = {
+            .gpu = rr->gpu,
+            .stage = stage,
+            .count = count,
+            .repr = pass->cur_img.repr,
+            .color = pass->cur_img.color,
+            .components = pass->cur_img.comps,
+            .src_rect = pass->src_rect,
+            .dst_rect = pass->dst_rect,
+        };
+
+        switch (hook->input) {
+        case PL_SHADER_SIG_NONE: {
+            if (!cur_tex) {
+                int index = pass->hook_index++;
+                if (index == rr->num_hook_fbos)
+                    TARRAY_APPEND(rr, rr->hook_fbos, rr->num_hook_fbos, NULL);
+
+                cur_tex = finalize_img(rr, cur_img, rr->fbofmt, &rr->hook_fbos[index]);
+                if (!cur_tex) {
+                    PL_ERR(rr, "Failed dispatching hook: Disabling...");
+                    goto error;
+                }
+
+                pl_assert(!cur_img->sh);
+                cur_img->sh = pl_dispatch_begin(rr->dp);
+            }
+
+            hparams.tex = (struct pl_hook_tex) {
+                .tex = cur_tex,
+                .src_rect = cur_img->rect,
+                .repr = cur_img->repr,
+            };
+
+            cur_tex = NULL;
+            break;
+        }
+
+        case PL_SHADER_SIG_COLOR:
+            if (cur_tex) {
+                pl_assert(!cur_img->sh);
+                cur_img->sh = pl_dispatch_begin(rr->dp);
+                pl_shader_sample_direct(cur_img->sh, &(struct pl_sample_src) {
+                    .tex = cur_tex,
+                });
+                cur_tex = NULL;
+            }
+            break;
+
+        default: abort();
+        }
+
+        hparams.sh = cur_img->sh;
+        pl_assert(hparams.sh);
+        pl_assert(!cur_tex);
+
+        int res = hook->hook(hook->priv, &hparams);
+        if (res < 0) {
+            PL_ERR(rr, "Failed executing hook, disabling");
+            goto error;
+        }
+
+        if (res & PL_HOOK_STATUS_SAVE) {
+            int index = pass->hook_index++;
+            if (index == rr->num_hook_fbos)
+                TARRAY_APPEND(rr, rr->hook_fbos, rr->num_hook_fbos, NULL);
+
+            cur_tex = finalize_img(rr, cur_img, rr->fbofmt, &rr->hook_fbos[index]);
+            if (!cur_tex) {
+                PL_ERR(rr, "Failed dispatching hook: Disabling...");
+                goto error;
+            }
+
+            struct pl_save_params sparams = {
+                .gpu = rr->gpu,
+                .stage = stage,
+                .count = count,
+                .tex = {
+                    .tex = cur_tex,
+                    .src_rect = cur_img->rect,
+                    .repr = cur_img->repr,
+                },
+            };
+
+            hook->save(hook->priv, &sparams);
+        }
+
+        if (res & PL_HOOK_STATUS_AGAIN) {
+            count++;
+            goto repeat_hook;
+        }
+    }
+
+    if (cur_tex) {
+        pl_assert(!cur_img->sh);
+        cur_img->sh = pl_dispatch_begin(rr->dp);
+        pl_shader_sample_direct(cur_img->sh, &(struct pl_sample_src) {
+            .tex = cur_tex,
+        });
+    }
+
+    return;
+
+error:
+    rr->disable_hooks = true;
+    return;
+}
+
 // `deband_src` results
 enum {
     DEBAND_NOOP = 0, // no debanding was performing
@@ -806,83 +934,17 @@ static bool pass_read_image(struct pl_renderer *rr, struct pass_state *pass,
         },
     };
 
+    GLSL("}\n");
+
+    pass_opt_hook_point(rr, pass, PL_HOOK_NATIVE, params);
+
     // Convert the image colorspace
     pl_shader_decode_color(sh, &pass->cur_img.repr, params->color_adjustment);
+    pass_opt_hook_point(rr, pass, PL_HOOK_RGB, params);
 
     // HDR peak detection, do this as early as possible
     hdr_update_peak(rr, sh, pass, params);
-
-    GLSL("}\n");
     return true;
-}
-
-static void pass_opt_hook_point(struct pl_renderer *rr, struct pass_state *pass,
-                                enum pl_hook_stage stage,
-                                const struct pl_render_params *params)
-{
-    if (!rr->fbofmt || rr->disable_hooks)
-        return;
-
-    for (int i = 0; i < params->num_hooks; i++) {
-        const struct pl_hook *hook = params->hooks[i];
-        if (!(hook->stages & stage))
-            continue;
-
-        int count = 0;
-
-repeat_hook:
-
-        PL_TRACE(rr, "Dispatching hook: idx %d count %d stage 0x%x", i, count, stage);
-        struct pl_hook_params hparams = {
-            .gpu = rr->gpu,
-            .stage = stage,
-            .count = count,
-            .repr = pass->cur_img.repr,
-            .color = pass->cur_img.color,
-            .components = pass->cur_img.comps,
-            .src_rect = pass->src_rect,
-            .dst_rect = pass->dst_rect,
-        };
-
-        switch (hook->input) {
-        case PL_SHADER_SIG_NONE: {
-            int index = pass->hook_index++;
-            if (index == rr->num_hook_fbos)
-                TARRAY_APPEND(rr, rr->hook_fbos, rr->num_hook_fbos, NULL);
-
-            hparams.tex = (struct pl_hook_tex) {
-                .tex = finalize_img(rr, &pass->cur_img, rr->fbofmt, &rr->hook_fbos[index]),
-                .src_rect = pass->cur_img.rect,
-                .repr = pass->cur_img.repr,
-            };
-
-            if (!hparams.tex.tex) {
-                PL_ERR(rr, "Failed dispatching hook: Disabling...");
-                rr->disable_hooks = true;
-                return;
-            }
-
-            hparams.sh = pass->cur_img.sh = pl_dispatch_begin(rr->dp);
-            break;
-        }
-
-        case PL_SHADER_SIG_COLOR:
-            hparams.sh = pass->cur_img.sh;
-            break;
-
-        default: abort();
-        }
-
-        // TODO: run hook
-
-        struct pl_save_params sparams = {
-            .gpu = rr->gpu,
-            .stage = stage,
-            .count = count,
-        };
-
-        // TODO: save hook
-    }
 }
 
 static bool pass_scale_main(struct pl_renderer *rr, struct pass_state *pass,
@@ -935,10 +997,13 @@ static bool pass_scale_main(struct pl_renderer *rr, struct pass_state *pass,
     if (use_linear) {
         pl_shader_linearize(img->sh, img->color.transfer);
         img->color.transfer = PL_COLOR_TRC_LINEAR;
+        pass_opt_hook_point(rr, pass, PL_HOOK_LINEAR, params);
     }
 
-    if (use_sigmoid)
+    if (use_sigmoid) {
         pl_shader_sigmoidize(img->sh, params->sigmoid_params);
+        pass_opt_hook_point(rr, pass, PL_HOOK_SIGMOID, params);
+    }
 
     src.tex = finalize_img(rr, img, rr->fbofmt, &rr->main_scale_fbo);
     if (!src.tex)
@@ -949,6 +1014,7 @@ static bool pass_scale_main(struct pl_renderer *rr, struct pass_state *pass,
                   img->color, use_sigmoid, NULL, params);
 
     struct pl_shader *sh = pl_dispatch_begin_ex(rr->dp, true);
+    pass_opt_hook_point(rr, pass, PL_HOOK_PREKERNEL, params);
     dispatch_sampler(rr, sh, &rr->samplers[SCALER_MAIN], params, &src);
     pass->cur_img = (struct img) {
         .sh     = sh,
@@ -959,9 +1025,12 @@ static bool pass_scale_main(struct pl_renderer *rr, struct pass_state *pass,
         .comps  = img->comps,
     };
 
+    pass_opt_hook_point(rr, pass, PL_HOOK_POSTKERNEL, params);
+
     if (use_sigmoid)
         pl_shader_unsigmoidize(sh, params->sigmoid_params);
 
+    pass_opt_hook_point(rr, pass, PL_HOOK_SCALED, params);
     return true;
 }
 
@@ -1056,6 +1125,10 @@ fallback:
     }
 
     pl_shader_encode_color(sh, &target->repr);
+    pass_opt_hook_point(rr, pass, PL_HOOK_OUTPUT, params);
+    // FIXME: What if this ends up being a compute shader?? Should we do the
+    // is_compute unredirection *after* encode_color, or will that fuck up
+    // the bit depth?
 
     // FIXME: Technically we should try dithering before bit shifting if we're
     // going to be encoding to a low bit depth, since the caller might end up
