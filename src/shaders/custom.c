@@ -662,7 +662,7 @@ struct hook_priv {
 
     // State for PRNG/frame count
     int frame_count;
-    uint64_t prng_state;
+    uint64_t prng_state[4];
 };
 
 static void hook_reset(void *priv)
@@ -713,9 +713,19 @@ static bool lookup_tex(void *priv, struct bstr var, float size[2])
     return false;
 }
 
-static double prng_step(uint64_t *prng_state)
+static double prng_step(uint64_t s[4])
 {
-    abort(); // TODO
+    const uint64_t result = s[0] + s[3];
+    const uint64_t t = s[1] << 17;
+
+    s[2] ^= s[0];
+    s[3] ^= s[1];
+    s[1] ^= s[2];
+    s[0] ^= s[3];
+
+    s[2] ^= t;
+    s[3] = (s[3] << 45) | (s[3] >> (64 - 45));
+    return (result >> 11) * 0x1.0p-53;
 }
 
 static bool bind_hook_tex(struct pl_shader *sh, struct bstr name,
@@ -892,7 +902,7 @@ next_bind: ; // outer 'continue'
         .dynamic = true,
     }));
 
-    double random = prng_step(&p->prng_state);
+    double random = prng_step(p->prng_state);
     GLSLH("#define random %s \n", sh_var(sh, (struct pl_shader_var) {
         .var = pl_var_float("random"),
         .data = &random,
@@ -1019,6 +1029,11 @@ const struct pl_hook *pl_parse_mpv_user_shader(const struct pl_gpu *gpu,
         .ctx = gpu->ctx,
         .gpu = gpu,
         .tactx = hook,
+        .prng_state = {
+            // Determined by fair die roll
+            0xb76d71f9443c228allu, 0x93a02092fc4807e8llu,
+            0x06d81748f838bd07llu, 0x9381ee129dddce6cllu,
+        },
     };
 
     struct bstr text = bstrdup(hook, bstr0(shader_text));
