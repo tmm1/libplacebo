@@ -45,8 +45,8 @@ enum pl_hook_stage {
     PL_HOOK_LINEAR          = 1 << 9,  // After linearization but before scaling
     PL_HOOK_SIGMOID         = 1 << 10, // After sigmoidization
     PL_HOOK_PRE_OVERLAY     = 1 << 11, // Before applying on-image overlays
-    PL_HOOK_PREKERNEL       = 1 << 12, // Immediately before the main scaler kernel (after overlays)
-    PL_HOOK_POSTKERNEL      = 1 << 13, // Immediately after the main scaler kernel
+    PL_HOOK_PRE_KERNEL      = 1 << 12, // Immediately before the main scaler kernel (after overlays)
+    PL_HOOK_POST_KERNEL     = 1 << 13, // Immediately after the main scaler kernel
     PL_HOOK_SCALED          = 1 << 14, // After scaling, before color management
     PL_HOOK_OUTPUT          = 1 << 15, // After color management, before dithering
 };
@@ -70,6 +70,8 @@ static inline bool pl_hook_stage_resizable(enum pl_hook_stage stage) {
 enum pl_hook_flags {
     PL_HOOK_STATUS_AGAIN     = 1 << 0,  // If set, the same hook is run again
     PL_HOOK_STATUS_SAVE      = 1 << 1,  // If set, run the `save` function
+    PL_HOOK_STATUS_OVERWRITE = 1 << 2,  // If set, the shader output "replaces"
+                                        // the hooked image
 };
 
 // Struct encapsulating a texture + metadata on how to use it
@@ -133,6 +135,9 @@ struct pl_hook {
     enum pl_shader_sig input;   // Which input signature this hook expects
     void *priv;                 // Arbitrary user context
 
+    // Note: The only allowed output signature is `PL_SHADER_SIG_COLOR`, which
+    // is why there's no `output` analog of `input`.
+
     // Called at the beginning of passes, to reset/initialize the hook. (Optional)
     void (*reset)(void *priv);
 
@@ -154,9 +159,9 @@ struct pl_hook {
 //
 // The resulting `pl_hook` objects should be destroyed with the corresponding
 // destructor when no longer needed.
-const struct pl_hook *pl_parse_mpv_user_shader(const struct pl_gpu *gpu,
+const struct pl_hook *pl_mpv_user_shader_parse(const struct pl_gpu *gpu,
                                                const char *shader_text);
 
-void pl_destroy_mpv_user_shader(const struct pl_hook **hook);
+void pl_mpv_user_shader_destroy(const struct pl_hook **hook);
 
 #endif // LIBPLACEBO_SHADERS_CUSTOM_H_

@@ -585,16 +585,16 @@ static enum pl_hook_stage mp_stage_to_pl(struct bstr stage)
     if (bstr_equals0(stage, "MAINPRESUB"))
         return PL_HOOK_RGB;
     if (bstr_equals0(stage, "MAIN"))
-        return PL_HOOK_PRE_OVERLAY; // Note: This is not quite the same thing
+        return PL_HOOK_RGB; // Note: conflicts with above!
 
     if (bstr_equals0(stage, "LINEAR"))
         return PL_HOOK_LINEAR;
     if (bstr_equals0(stage, "SIGMOID"))
         return PL_HOOK_SIGMOID;
     if (bstr_equals0(stage, "PREKERNEL"))
-        return PL_HOOK_PREKERNEL;
+        return PL_HOOK_PRE_KERNEL;
     if (bstr_equals0(stage, "POSTKERNEL"))
-        return PL_HOOK_POSTKERNEL;
+        return PL_HOOK_POST_KERNEL;
 
     if (bstr_equals0(stage, "SCALED"))
         return PL_HOOK_SCALED;
@@ -621,9 +621,9 @@ static struct bstr pl_stage_to_mp(enum pl_hook_stage stage)
 
     case PL_HOOK_LINEAR:        return bstr0("LINEAR");
     case PL_HOOK_SIGMOID:       return bstr0("SIGMOID");
-    case PL_HOOK_PRE_OVERLAY:   return bstr0("MAIN"); // Note: See above
-    case PL_HOOK_PREKERNEL:     return bstr0("PREKERNEL");
-    case PL_HOOK_POSTKERNEL:    return bstr0("POSTKERNEL");
+    case PL_HOOK_PRE_OVERLAY:   return bstr0("PREOVERLAY"); // Note: doesn't exist!
+    case PL_HOOK_PRE_KERNEL:    return bstr0("PREKERNEL");
+    case PL_HOOK_POST_KERNEL:   return bstr0("POSTKERNEL");
 
     case PL_HOOK_SCALED:        return bstr0("SCALED");
     case PL_HOOK_OUTPUT:        return bstr0("OUTPUT");
@@ -889,6 +889,10 @@ static int hook_hook(void *priv, const struct pl_hook_params *params)
             }
         }
 
+        // If none of the above matched, this is a bogus/unknown texture name
+        PL_ERR(p, "Tried binding unknown texture '%.*s'!", BSTR_P(texname));
+        return -1;
+
 next_bind: ; // outer 'continue'
     }
 
@@ -947,6 +951,7 @@ next_bind: ; // outer 'continue'
         y0 + out_size[1],
     };
 
+    // TODO: also save if we re-use this implicitly overwritten texture later
     if (hook->save_tex.start)
         ret |= PL_HOOK_STATUS_SAVE;
 
@@ -1020,7 +1025,7 @@ static bool register_tex(void *priv, struct custom_shader_tex tex)
     return true;
 }
 
-const struct pl_hook *pl_parse_mpv_user_shader(const struct pl_gpu *gpu,
+const struct pl_hook *pl_mpv_user_shader_parse(const struct pl_gpu *gpu,
                                                const char *shader_text)
 {
     struct pl_hook *hook = talloc_priv(NULL, struct pl_hook, struct hook_priv);
@@ -1062,7 +1067,7 @@ error:
     return NULL;
 }
 
-void pl_destroy_mpv_user_shader(const struct pl_hook **hookp)
+void pl_mpv_user_shader_destroy(const struct pl_hook **hookp)
 {
     const struct pl_hook *hook = *hookp;
     if (!hook)

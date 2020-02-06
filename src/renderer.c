@@ -561,7 +561,11 @@ repeat_hook:
             .components = pass->cur_img.comps,
             .src_rect = pass->src_rect,
             .dst_rect = pass->dst_rect,
+            .rect = &cur_img->rect,
         };
+
+        // TODO: properly don't overwrite `cur_tex` etc, because not all
+        // shader passes overwrite the image!!
 
         switch (hook->input) {
         case PL_SHADER_SIG_NONE: {
@@ -619,8 +623,9 @@ repeat_hook:
             if (index == rr->num_hook_fbos)
                 TARRAY_APPEND(rr, rr->hook_fbos, rr->num_hook_fbos, NULL);
 
-            cur_tex = finalize_img(rr, cur_img, rr->fbofmt, &rr->hook_fbos[index]);
-            if (!cur_tex) {
+            const struct pl_tex *tex;
+            tex = finalize_img(rr, cur_img, rr->fbofmt, &rr->hook_fbos[index]);
+            if (!tex) {
                 PL_ERR(rr, "Failed dispatching hook: Disabling...");
                 goto error;
             }
@@ -630,13 +635,16 @@ repeat_hook:
                 .stage = stage,
                 .count = count,
                 .tex = {
-                    .tex = cur_tex,
+                    .tex = tex,
                     .src_rect = cur_img->rect,
                     .repr = cur_img->repr,
                 },
             };
 
             hook->save(hook->priv, &sparams);
+
+            if (res & PL_HOOK_STATUS_OVERWRITE)
+                cur_tex = tex;
         }
 
         if (res & PL_HOOK_STATUS_AGAIN) {
@@ -968,6 +976,16 @@ static bool pass_scale_main(struct pl_renderer *rr, struct pass_state *pass,
     bool need_fbo = image->num_overlays > 0;
     need_fbo |= rr->peak_detect_state && !params->allow_delayed_peak_detect;
 
+    // We need to enable the full rendering pipeline if there are any user
+    // shaders / hooks that might depend on it.
+    uint64_t hooks = PL_HOOK_LINEAR | PL_HOOK_SIGMOID | PL_HOOK_PRE_OVERLAY |
+                     PL_HOOK_PRE_KERNEL | PL_HOOK_POST_KERNEL;
+
+    for (int i = 0; i < params->num_hooks; i++) {
+        if (params->hooks[i]->stages & hooks)
+            need_fbo = true;
+    }
+
     struct sampler_info info = sample_src_info(rr, &src, params);
     if (info.type == SAMPLER_DIRECT && !need_fbo) {
         PL_TRACE(rr, "Skipping main scaler (free sampling)");
@@ -1005,6 +1023,8 @@ static bool pass_scale_main(struct pl_renderer *rr, struct pass_state *pass,
         pass_opt_hook_point(rr, pass, PL_HOOK_SIGMOID, params);
     }
 
+    pass_opt_hook_point(rr, pass, PL_HOOK_PRE_OVERLAY, params);
+
     src.tex = finalize_img(rr, img, rr->fbofmt, &rr->main_scale_fbo);
     if (!src.tex)
         return false;
@@ -1013,8 +1033,10 @@ static bool pass_scale_main(struct pl_renderer *rr, struct pass_state *pass,
     draw_overlays(rr, src.tex, image->overlays, image->num_overlays,
                   img->color, use_sigmoid, NULL, params);
 
+    // TODO: hook texture directly
+    // pass_opt_hook_point(rr, pass, PL_HOOK_PRE_KERNEL, params);
+
     struct pl_shader *sh = pl_dispatch_begin_ex(rr->dp, true);
-    pass_opt_hook_point(rr, pass, PL_HOOK_PREKERNEL, params);
     dispatch_sampler(rr, sh, &rr->samplers[SCALER_MAIN], params, &src);
     pass->cur_img = (struct img) {
         .sh     = sh,
@@ -1025,7 +1047,7 @@ static bool pass_scale_main(struct pl_renderer *rr, struct pass_state *pass,
         .comps  = img->comps,
     };
 
-    pass_opt_hook_point(rr, pass, PL_HOOK_POSTKERNEL, params);
+    pass_opt_hook_point(rr, pass, PL_HOOK_POST_KERNEL, params);
 
     if (use_sigmoid)
         pl_shader_unsigmoidize(sh, params->sigmoid_params);

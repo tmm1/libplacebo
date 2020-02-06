@@ -377,26 +377,26 @@ static const char *user_shader_tests[] = {
     // Test hooking, saving and loading
     "// Example of a comment at the beginning                               \n"
     "                                                                       \n"
-    "//!HOOK LUMA                                                           \n"
-    "//!DESC downscale luma                                                 \n"
+    "//!HOOK NATIVE                                                         \n"
+    "//!DESC downscale image                                                \n"
     "//!BIND HOOKED                                                         \n"
     "//!WIDTH HOOKED.w 10 /                                                 \n"
     "//!HEIGHT HOOKED.h 10 /                                                \n"
-    "//!SAVE LUMASMALL                                                      \n"
-    "//!WHEN LUMA.w 500 >                                                   \n"
+    "//!SAVE NATIVESMALL                                                    \n"
+    "//!WHEN NATIVE.w 500 >                                                 \n"
     "                                                                       \n"
     "vec4 hook()                                                            \n"
     "{                                                                      \n"
-    "    return LUMA_texOff(0);                                             \n"
+    "    return HOOKED_texOff(0);                                           \n"
     "}                                                                      \n"
     "                                                                       \n"
     "//!HOOK MAIN                                                           \n"
-    "//!DESC upscale smaller luma                                           \n"
-    "//!BIND LUMASMALL                                                      \n"
+    "//!DESC upscale smaller image                                          \n"
+    "//!BIND NATIVESMALL                                                    \n"
     "                                                                       \n"
     "vec4 hook()                                                            \n"
     "{                                                                      \n"
-    "    return vec4(LUMASMALL_texOff(0).rrr, 1);                           \n"
+    "    return vec4(NATIVESMALL_texOff(0).rrr, 1);                         \n"
     "}                                                                      \n",
 
     // Test use of textures
@@ -561,14 +561,14 @@ static void pl_render_tests(const struct pl_gpu *gpu)
     for (int i = 0; i < PL_ARRAY_SIZE(user_shader_tests); i++) {
         printf("testing user shader:\n\n%s\n", user_shader_tests[i]);
         const struct pl_hook *hook;
-        hook = pl_parse_mpv_user_shader(gpu, user_shader_tests[i]);
+        hook = pl_mpv_user_shader_parse(gpu, user_shader_tests[i]);
         REQUIRE(hook);
 
         params.hooks = &hook;
         params.num_hooks = 1;
         REQUIRE(pl_render_image(rr, &image, &target, &params));
 
-        pl_destroy_mpv_user_shader(&hook);
+        pl_mpv_user_shader_destroy(&hook);
     }
 
 error:
