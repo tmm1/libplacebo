@@ -272,14 +272,17 @@ static const struct pl_tex *finalize_img(struct pl_renderer *rr,
 }
 
 struct pass_state {
+    // Pointer back to the renderer itself, for callbacks
+    struct pl_renderer *rr;
+
     // Represents the "current" image which we're in the process of rendering.
     // This is initially set by pass_read_image, and all of the subsequent
     // rendering steps will mutate this in-place.
     struct img cur_img;
 
-    // Current effective `src_rect` / `dst_rect`
-    struct pl_rect2df src_rect; // may be modified by user hooks
-    struct pl_rect2d dst_rect;  // may not be modified
+    // Cached copies of the `image` / `target` for this rendering pass
+    struct pl_image image;
+    struct pl_render_target target;
 
     // Index into `rr->hook_fbos`
     int hook_index;
@@ -532,6 +535,36 @@ static void draw_overlays(struct pl_renderer *rr, const struct pl_tex *fbo,
     }
 }
 
+static const struct pl_tex *get_hook_tex(void *priv, int width, int height)
+{
+    struct pass_state *pass = priv;
+    struct pl_renderer *rr = pass->rr;
+
+    int idx = pass->hook_index;
+    if (idx == rr->num_hook_fbos)
+        TARRAY_APPEND(rr, rr->hook_fbos, rr->num_hook_fbos, NULL);
+
+    pl_assert(rr->fbofmt);
+    bool ok = pl_tex_recreate(rr->gpu, &rr->hook_fbos[idx], &(struct pl_tex_params) {
+        .w = width,
+        .h = height,
+        .format = rr->fbofmt,
+        .sampleable = true,
+        .renderable = true,
+        // Just enable what we can
+        .storable   = !!(rr->fbofmt->caps & PL_FMT_CAP_STORABLE),
+        .sample_mode = (rr->fbofmt->caps & PL_FMT_CAP_LINEAR)
+                            ? PL_TEX_SAMPLE_LINEAR
+                            : PL_TEX_SAMPLE_NEAREST,
+    });
+
+    if (!ok)
+        return NULL;
+
+    pass->hook_index++;
+    return rr->hook_fbos[idx];
+}
+
 static void pass_opt_hook_point(struct pl_renderer *rr, struct pass_state *pass,
                                 enum pl_hook_stage stage,
                                 const struct pl_render_params *params)
@@ -542,62 +575,48 @@ static void pass_opt_hook_point(struct pl_renderer *rr, struct pass_state *pass,
     const struct pl_tex *cur_tex = NULL;
     struct img *cur_img = &pass->cur_img;
 
-    // TODO: rewrite this for the new style of dispatch
-
-    /*
-    for (int i = 0; i < params->num_hooks; i++) {
-        const struct pl_hook *hook = params->hooks[i];
+    for (int n = 0; n < params->num_hooks; n++) {
+        const struct pl_hook *hook = params->hooks[n];
         if (!(hook->stages & stage))
             continue;
 
-        int count = 0;
-
-repeat_hook:
-
-        PL_TRACE(rr, "Dispatching hook: idx %d count %d stage 0x%x", i, count, stage);
+        PL_TRACE(rr, "Dispatching hook %d stage 0x%x", n, stage);
         struct pl_hook_params hparams = {
             .gpu = rr->gpu,
+            .dispatch = rr->dp,
+            .get_tex = get_hook_tex,
+            .priv = pass,
             .stage = stage,
-            .count = count,
+            .rect = cur_img->rect,
             .repr = pass->cur_img.repr,
             .color = pass->cur_img.color,
             .components = pass->cur_img.comps,
-            .src_rect = pass->src_rect,
-            .dst_rect = pass->dst_rect,
-            .rect = &cur_img->rect,
+            .src_rect = pass->image.src_rect,
+            .dst_rect = pass->target.dst_rect,
         };
 
-        // TODO: properly don't overwrite `cur_tex` etc, because not all
-        // shader passes overwrite the image!!
-
         switch (hook->input) {
-        case PL_SHADER_SIG_NONE: {
+        case PL_HOOK_SIG_NONE:
+            break;
+
+        case PL_HOOK_SIG_TEX: {
             if (!cur_tex) {
-                int index = pass->hook_index++;
-                if (index == rr->num_hook_fbos)
+                int idx = pass->hook_index++;
+                if (idx == rr->num_hook_fbos)
                     TARRAY_APPEND(rr, rr->hook_fbos, rr->num_hook_fbos, NULL);
 
-                cur_tex = finalize_img(rr, cur_img, rr->fbofmt, &rr->hook_fbos[index]);
+                cur_tex = finalize_img(rr, cur_img, rr->fbofmt, &rr->hook_fbos[idx]);
                 if (!cur_tex) {
-                    PL_ERR(rr, "Failed dispatching hook: Disabling...");
+                    PL_ERR(rr, "Failed dispatching shader prior to hook!");
                     goto error;
                 }
-
-                pl_assert(!cur_img->sh);
-                cur_img->sh = pl_dispatch_begin(rr->dp);
             }
 
-            hparams.tex = (struct pl_hook_tex) {
-                .tex = cur_tex,
-                .src_rect = cur_img->rect,
-                .repr = cur_img->repr,
-            };
-
-            cur_tex = NULL;
+            hparams.tex = cur_tex;
             break;
         }
 
-        case PL_SHADER_SIG_COLOR:
+        case PL_HOOK_SIG_COLOR:
             if (cur_tex) {
                 pl_assert(!cur_img->sh);
                 cur_img->sh = pl_dispatch_begin(rr->dp);
@@ -606,53 +625,49 @@ repeat_hook:
                 });
                 cur_tex = NULL;
             }
+
+            hparams.sh = cur_img->sh;
             break;
 
         default: abort();
         }
 
-        hparams.sh = cur_img->sh;
-        pl_assert(hparams.sh);
-        pl_assert(!cur_tex);
-
-        int res = hook->hook(hook->priv, &hparams);
-        if (res < 0) {
+        struct pl_hook_res res = hook->hook(hook->priv, &hparams);
+        if (res.failed) {
             PL_ERR(rr, "Failed executing hook, disabling");
             goto error;
         }
 
-        if (res & PL_HOOK_STATUS_SAVE) {
-            int index = pass->hook_index++;
-            if (index == rr->num_hook_fbos)
-                TARRAY_APPEND(rr, rr->hook_fbos, rr->num_hook_fbos, NULL);
+        switch (res.output) {
+        case PL_HOOK_SIG_NONE:
+            break;
 
-            const struct pl_tex *tex;
-            tex = finalize_img(rr, cur_img, rr->fbofmt, &rr->hook_fbos[index]);
-            if (!tex) {
-                PL_ERR(rr, "Failed dispatching hook: Disabling...");
-                goto error;
-            }
-
-            struct pl_save_params sparams = {
-                .gpu = rr->gpu,
-                .stage = stage,
-                .count = count,
-                .tex = {
-                    .tex = tex,
-                    .src_rect = cur_img->rect,
-                    .repr = cur_img->repr,
-                },
+        case PL_HOOK_SIG_TEX:
+            cur_tex = res.tex;
+            *cur_img = (struct img) {
+                .repr = res.repr,
+                .color = res.color,
+                .comps = res.components,
+                .rect = res.rect,
+                .w = res.tex->params.w,
+                .h = res.tex->params.h,
             };
+            break;
 
-            hook->save(hook->priv, &sparams);
+        case PL_HOOK_SIG_COLOR:
+            cur_tex = NULL;
+            *cur_img = (struct img) {
+                .sh = res.sh,
+                .repr = res.repr,
+                .color = res.color,
+                .comps = res.components,
+                .rect = res.rect,
+                .w = res.sh->output_w,
+                .h = res.sh->output_h,
+            };
+            break;
 
-            if (res & PL_HOOK_STATUS_OVERWRITE)
-                cur_tex = tex;
-        }
-
-        if (res & PL_HOOK_STATUS_AGAIN) {
-            count++;
-            goto repeat_hook;
+        default: abort();
         }
     }
 
@@ -663,7 +678,6 @@ repeat_hook:
             .tex = cur_tex,
         });
     }
-    */
 
     return;
 
@@ -799,9 +813,9 @@ cleanup:
 
 // This scales and merges all of the source images, and initializes the cur_img.
 static bool pass_read_image(struct pl_renderer *rr, struct pass_state *pass,
-                            const struct pl_image *image,
                             const struct pl_render_params *params)
 {
+    const struct pl_image *image = &pass->image;
     struct pl_shader *sh = pl_dispatch_begin_ex(rr->dp, true);
     sh_require(sh, PL_SHADER_SIG_NONE, 0, 0);
 
@@ -960,7 +974,6 @@ static bool pass_read_image(struct pl_renderer *rr, struct pass_state *pass,
 }
 
 static bool pass_scale_main(struct pl_renderer *rr, struct pass_state *pass,
-                            const struct pl_image *image,
                             const struct pl_render_params *params)
 {
     if (!rr->fbofmt) {
@@ -968,12 +981,15 @@ static bool pass_scale_main(struct pl_renderer *rr, struct pass_state *pass,
         return true;
     }
 
+    const struct pl_image *image = &pass->image;
+    const struct pl_render_target *target = &pass->target;
+
     struct img *img = &pass->cur_img;
     struct pl_sample_src src = {
         .tex        = &(struct pl_tex) { .params = img_params(rr, img, rr->fbofmt) },
         .components = img->comps,
-        .new_w      = abs(pl_rect_w(pass->dst_rect)),
-        .new_h      = abs(pl_rect_h(pass->dst_rect)),
+        .new_w      = abs(pl_rect_w(target->dst_rect)),
+        .new_h      = abs(pl_rect_h(target->dst_rect)),
         .rect       = img->rect,
     };
 
@@ -1061,10 +1077,10 @@ static bool pass_scale_main(struct pl_renderer *rr, struct pass_state *pass,
 }
 
 static bool pass_output_target(struct pl_renderer *rr, struct pass_state *pass,
-                               const struct pl_image *image,
-                               const struct pl_render_target *target,
                                const struct pl_render_params *params)
 {
+    const struct pl_image *image = &pass->image;
+    const struct pl_render_target *target = &pass->target;
     const struct pl_tex *fbo = target->fbo;
     struct pl_shader *sh = pass->cur_img.sh;
 
@@ -1218,11 +1234,18 @@ bool pl_render_image(struct pl_renderer *rr, const struct pl_image *pimage,
 {
     params = PL_DEF(params, &pl_render_default_params);
 
-    struct pl_image image = *pimage;
-    struct pl_render_target target = *ptarget;
-    fix_rects(&image, &target);
-    pl_color_space_infer(&image.color);
-    pl_color_space_infer(&target.color);
+    struct pass_state pass = {
+        .rr = rr,
+        .image = *pimage,
+        .target = *ptarget,
+    };
+
+    struct pl_image *image = &pass.image;
+    struct pl_render_target *target = &pass.target;
+
+    fix_rects(image, target);
+    pl_color_space_infer(&image->color);
+    pl_color_space_infer(&target->color);
 
     // TODO: output caching
     pl_dispatch_reset_frame(rr->dp);
@@ -1232,42 +1255,36 @@ bool pl_render_image(struct pl_renderer *rr, const struct pl_image *pimage,
             params->hooks[i]->reset(params->hooks[i]->priv);
     }
 
-    struct pass_state pass = {
-        .src_rect = image.src_rect,
-        .dst_rect = target.dst_rect,
-    };
-
-    if (!pass_read_image(rr, &pass, &image, params))
+    if (!pass_read_image(rr, &pass, params))
         goto error;
 
-    if (!pass_scale_main(rr, &pass, &image, params))
+    if (!pass_scale_main(rr, &pass, params))
         goto error;
 
-    if (!pass_output_target(rr, &pass, &image, &target, params))
+    if (!pass_output_target(rr, &pass, params))
         goto error;
 
     // If we don't have FBOs available, simulate the on-image overlays at
     // this stage
-    if (image.num_overlays > 0 && !rr->fbofmt) {
-        // TODO: figure out if we want pass.src_rect or image.src_rect!!!
-        float rx = pl_rect_w(target.dst_rect) / pl_rect_w(image.src_rect),
-              ry = pl_rect_h(target.dst_rect) / pl_rect_h(image.src_rect);
+    if (image->num_overlays > 0 && !rr->fbofmt) {
+        float rx = pl_rect_w(target->dst_rect) / pl_rect_w(image->src_rect),
+              ry = pl_rect_h(target->dst_rect) / pl_rect_h(image->src_rect);
 
         struct pl_transform2x2 scale = {
             .mat = {{{ rx, 0.0 }, { 0.0, ry }}},
             .c = {
-                target.dst_rect.x0 - image.src_rect.x0 * rx,
-                target.dst_rect.y0 - image.src_rect.y0 * ry
+                target->dst_rect.x0 - image->src_rect.x0 * rx,
+                target->dst_rect.y0 - image->src_rect.y0 * ry
             },
         };
 
-        draw_overlays(rr, target.fbo, image.overlays, image.num_overlays,
-                      target.color, false, &scale, params);
+        draw_overlays(rr, target->fbo, image->overlays, image->num_overlays,
+                      target->color, false, &scale, params);
     }
 
     // Draw the final output overlays
-    draw_overlays(rr, target.fbo, target.overlays, target.num_overlays,
-                  target.color, false, NULL, params);
+    draw_overlays(rr, target->fbo, target->overlays, target->num_overlays,
+                  target->color, false, NULL, params);
 
     return true;
 

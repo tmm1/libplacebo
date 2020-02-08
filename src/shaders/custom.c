@@ -523,6 +523,7 @@ static bool parse_tex(const struct pl_gpu *gpu, struct bstr *body,
         return false;
     }
 
+    params.initial_data = tex.start;
     out->tex = pl_tex_create(gpu, &params);
     talloc_free(tex.start);
 
@@ -626,6 +627,7 @@ static struct bstr pl_stage_to_mp(enum pl_hook_stage stage)
 
     case PL_HOOK_NATIVE:        return bstr0("NATIVE");
     case PL_HOOK_RGB:           return bstr0("MAINPRESUB");
+    // TODO: special-case this or something for compatiblity?
 
     case PL_HOOK_LINEAR:        return bstr0("LINEAR");
     case PL_HOOK_SIGMOID:       return bstr0("SIGMOID");
@@ -892,7 +894,7 @@ static struct pl_hook_res hook_hook(void *priv, const struct pl_hook_params *par
             }
 
             for (int j = 0; j < p->num_lut_textures; j++) {
-                if (bstr_equals(texname, p->lut_textures[i].name)) {
+                if (bstr_equals(texname, p->lut_textures[j].name)) {
                     // Directly bind this, no need to bother with all the
                     // `bind_pass_tex` boilerplate
                     ident_t id = sh_desc(sh, (struct pl_shader_desc) {
@@ -900,7 +902,7 @@ static struct pl_hook_res hook_hook(void *priv, const struct pl_hook_params *par
                             .name = "hook_lut",
                             .type = PL_DESC_SAMPLED_TEX,
                         },
-                        .object = p->lut_textures[i].tex,
+                        .object = p->lut_textures[j].tex,
                     });
                     GLSLH("#define %.*s %s \n", BSTR_P(texname), id);
                     goto next_bind;
@@ -908,8 +910,8 @@ static struct pl_hook_res hook_hook(void *priv, const struct pl_hook_params *par
             }
 
             for (int j = 0; j < p->num_pass_textures; j++) {
-                if (bstr_equals(texname, p->pass_textures[i].name)) {
-                    if (!bind_pass_tex(sh, texname, &p->pass_textures[i]))
+                if (bstr_equals(texname, p->pass_textures[j].name)) {
+                    if (!bind_pass_tex(sh, texname, &p->pass_textures[j]))
                         goto error;
                     goto next_bind;
                 }
@@ -1013,7 +1015,7 @@ static struct pl_hook_res hook_hook(void *priv, const struct pl_hook_params *par
         // Update the result object, unless we saved to a different name
         if (!hook->save_tex.start) {
             res = (struct pl_hook_res) {
-                .output = PL_SHADER_SIG_NONE,
+                .output = PL_HOOK_SIG_TEX,
                 .tex = fbo,
                 .repr = params->repr,
                 .color = params->color,
@@ -1066,7 +1068,7 @@ const struct pl_hook *pl_mpv_user_shader_parse(const struct pl_gpu *gpu,
     struct hook_priv *p = TA_PRIV(hook);
 
     *hook = (struct pl_hook) {
-        .input = PL_SHADER_SIG_NONE,
+        .input = PL_HOOK_SIG_TEX,
         .priv = p,
         .reset = hook_reset,
         .hook = hook_hook,

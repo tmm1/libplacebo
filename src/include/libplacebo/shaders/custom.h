@@ -66,6 +66,14 @@ static inline bool pl_hook_stage_resizable(enum pl_hook_stage stage) {
     }
 }
 
+// The different forms of communicating image data between the renderer and
+// the hooks
+enum pl_hook_sig {
+    PL_HOOK_SIG_NONE,   // No data is passed, no data is received/returned
+    PL_HOOK_SIG_COLOR,  // `vec4 color` already pre-sampled in a `pl_shader`
+    PL_HOOK_SIG_TEX,    // `pl_tex` containing the image data
+};
+
 struct pl_hook_params {
     // GPU objects associated with the `pl_renderer`, which the user may
     // use for their own purposes.
@@ -82,7 +90,7 @@ struct pl_hook_params {
     // Which stage triggered the hook to run.
     enum pl_hook_stage stage;
 
-    // For `PL_SHADER_SIG_COLOR`, this contains the existing shader object with
+    // For `PL_HOOK_SIG_COLOR`, this contains the existing shader object with
     // the color already pre-sampled into `vec4 color`. The user may modify
     // this as much as they want, as long as they don't run it.
     //
@@ -91,7 +99,7 @@ struct pl_hook_params {
     // be a compute shader.
     struct pl_shader *sh;
 
-    // For  PL_SHADER_SIG_NONE`, this contains the texture that the user should
+    // For `PL_HOOK_SIG_TEX`, this contains the texture that the user should
     // sample from.
     //
     // Note: This texture object is owned by the renderer, and users must not
@@ -102,10 +110,14 @@ struct pl_hook_params {
     // The effective current rectangle of the image we're rendering in this
     // shader, i.e. the effective rect of the content we're interested in,
     // as a crop of either `sh` or `tex` (depending on the signature).
+    //
+    // Note: This is still set even for `PL_HOOK_SIG_NONE`!
     struct pl_rect2df rect;
 
     // The current effective colorspace and representation, of either the
     // pre-sampled color (in `sh`), or the contents of `tex`, respectively.
+    //
+    // Note: This is still set even for `PL_HOOK_SIG_NONE`!
     struct pl_color_repr repr;
     struct pl_color_space color;
     int components;
@@ -121,27 +133,24 @@ struct pl_hook_res {
     // and all other fields are ignored.
     bool failed;
 
-    // What type of output this shader stage is returning.
-    enum pl_shader_sig output;
+    // What type of output this hook is returning.
+    // Note: If this is `PL_HOOK_SIG_NONE`, all other fields are ignored.
+    enum pl_hook_sig output;
 
-    // For `PL_SHADER_SIG_COLOR`, this *must* be set to a valid `pl_shader`
-    // object containing the sampled color value, and *should* be allocated
-    // from the given `pl_dispatch` object. Ignored otherwise.
+    // For `PL_HOOK_SIG_COLOR`, this *must* be set to a valid `pl_shader`
+    // object containing the sampled color value (i.e. with an output signature
+    // of `PL_SHADER_SIG_COLOR`), and *should* be allocated from the given
+    // `pl_dispatch` object. Ignored otherwise.
     struct pl_shader *sh;
 
-    // For `PL_SHADER_SIG_NONE`, this *may* contain the texture object
-    // containing the result of rendering the hook. This *should* be a texture
-    // allocated using the given `get_tex` callback, to ensure the format and
-    // texture usage flags are compatible with what the renderer expects.
+    // For `PL_HOOK_SIG_TEX`, this *must* contain the texture object containing
+    // the result of rendering the hook. This *should* be a texture allocated
+    // using the given `get_tex` callback, to ensure the format and texture
+    // usage flags are compatible with what the renderer expects.
     const struct pl_tex *tex;
 
-    // Note: It's possible for a shader to return neither `sh` or `tex`, in
-    // which case it's assumed that the shader has simply not decided to
-    // modify or replace the input texture in any way (such as a hook that
-    // only exists to render or save the input for internal usage).
-
-    // For shaders the somehow modify the input, this returns the new/altered
-    // versions of the existing "current texture" metadata.
+    // For shaders that return some sort of output, this contains the
+    // new/altered versions of the existing "current texture" metadata.
     struct pl_color_repr repr;
     struct pl_color_space color;
     int components;
@@ -154,7 +163,7 @@ struct pl_hook_res {
 
 struct pl_hook {
     enum pl_hook_stage stages;  // Which stages to hook on
-    enum pl_shader_sig input;   // Which input signature this hook expects
+    enum pl_hook_sig input;     // Which input signature this hook expects
     void *priv;                 // Arbitrary user context
 
     // Called at the beginning of passes, to reset/initialize the hook. (Optional)
