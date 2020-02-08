@@ -62,7 +62,7 @@ struct custom_shader_hook {
     // Shader body itself + metadata
     struct bstr pass_body;
     float offset[2];
-    int components;
+    int comps;
 
     // Special expressions governing the output size and execution conditions
     struct szexp width[MAX_SZEXP_SIZE];
@@ -266,7 +266,15 @@ static bool parse_hook(struct pl_context *ctx, struct bstr *body,
         }
 
         if (bstr_eatstart0(&line, "SAVE")) {
-            out->save_tex = bstr_strip(line);
+            struct bstr save_tex = bstr_strip(line);
+            if (bstr_equals0(save_tex, "HOOKED")) {
+                // This is a special name that means "overwrite existing"
+                // texture, which we just signal by not having any `save_tex`
+                // name set.
+                out->save_tex = (struct bstr) {0};
+            } else {
+                out->save_tex = save_tex;
+            };
             continue;
         }
 
@@ -311,7 +319,7 @@ static bool parse_hook(struct pl_context *ctx, struct bstr *body,
         }
 
         if (bstr_eatstart0(&line, "COMPONENTS")) {
-            if (bstr_sscanf(line, "%d", &out->components) != 1) {
+            if (bstr_sscanf(line, "%d", &out->comps) != 1) {
                 pl_err(ctx, "Error while parsing COMPONENTS!");
                 return false;
             }
@@ -639,7 +647,13 @@ struct hook_pass {
 
 struct pass_tex {
     struct bstr name;
-    struct pl_hook_tex tex;
+    const struct pl_tex *tex;
+
+    // Metadata
+    struct pl_rect2df rect;
+    struct pl_color_repr repr;
+    struct pl_color_space color;
+    int comps;
 };
 
 struct hook_priv {
@@ -682,9 +696,9 @@ static bool lookup_tex(void *priv, struct bstr var, float size[2])
     const struct pl_hook_params *params = ctx->params;
 
     if (bstr_equals0(var, "HOOKED")) {
-        pl_assert(params->tex.tex);
-        size[0] = params->tex.tex->params.w;
-        size[1] = params->tex.tex->params.h;
+        pl_assert(params->tex);
+        size[0] = params->tex->params.w;
+        size[1] = params->tex->params.h;
         return true;
     }
 
@@ -702,7 +716,7 @@ static bool lookup_tex(void *priv, struct bstr var, float size[2])
 
     for (int i = 0; i < p->num_pass_textures; i++) {
         if (bstr_equals(var, p->pass_textures[i].name)) {
-            const struct pl_tex *tex = p->pass_textures[i].tex.tex;
+            const struct pl_tex *tex = p->pass_textures[i].tex;
             size[0] = tex->params.w;
             size[1] = tex->params.h;
             return true;
@@ -727,11 +741,11 @@ static double prng_step(uint64_t s[4])
     return (result >> 11) * 0x1.0p-53;
 }
 
-static bool bind_hook_tex(struct pl_shader *sh, struct bstr name,
-                          const struct pl_hook_tex *htex)
+static bool bind_pass_tex(struct pl_shader *sh, struct bstr name,
+                          const struct pass_tex *ptex)
 {
     ident_t id, pos, size, pt;
-    id = sh_bind(sh, htex->tex, "hook_tex", &htex->src_rect, &pos, &size, &pt);
+    id = sh_bind(sh, ptex->tex, "hook_tex", &ptex->rect, &pos, &size, &pt);
     if (!id)
         return false;
 
@@ -740,13 +754,13 @@ static bool bind_hook_tex(struct pl_shader *sh, struct bstr name,
     GLSLH("#define %.*s_size %s \n", BSTR_P(name), size);
     GLSLH("#define %.*s_pt %s \n", BSTR_P(name), pt);
 
-    double off[2] = { htex->src_rect.x0, htex->src_rect.y0 };
+    double off[2] = { ptex->rect.x0, ptex->rect.y0 };
     GLSLH("#define %.*s_off %s \n", BSTR_P(name), sh_var(sh, (struct pl_shader_var) {
         .var = pl_var_vec2("offset"),
         .data = off,
     }));
 
-    struct pl_color_repr repr = htex->repr;
+    struct pl_color_repr repr = ptex->repr;
     float scale = pl_color_repr_normalize(&repr);
     GLSLH("#define %.*s_mul %f \n", BSTR_P(name), scale);
 
@@ -764,235 +778,255 @@ static bool bind_hook_tex(struct pl_shader *sh, struct bstr name,
     return true;
 }
 
-static int hook_hook(void *priv, const struct pl_hook_params *params)
+static void save_pass_tex(struct hook_priv *p, struct pass_tex ptex)
+{
+
+    for (int i = 0; i < p->num_pass_textures; i++) {
+        if (!bstr_equals(p->pass_textures[i].name, ptex.name))
+            continue;
+
+        p->pass_textures[i] = ptex;
+        return;
+    }
+
+    // No texture with this name yet, append new one
+    TARRAY_APPEND(p->tactx, p->pass_textures, p->num_pass_textures, ptex);
+}
+
+static struct pl_hook_res hook_hook(void *priv, const struct pl_hook_params *params)
 {
     struct hook_priv *p = priv;
     struct bstr stage = pl_stage_to_mp(params->stage);
+    struct pl_hook_res res = {0};
 
-    // Save the input texture if needed, but only once per hook
-    if (!params->count && (p->save_stages & params->stage)) {
-        pl_assert(params->tex.tex);
+    // Save the input texture if needed
+    if (p->save_stages & params->stage) {
+        pl_assert(params->tex);
         struct pass_tex ptex = {
             .name = stage,
             .tex = params->tex,
+            .rect = params->rect,
+            .repr = params->repr,
+            .color = params->color,
+            .comps = params->components,
         };
 
         PL_TRACE(p, "Saving input texture '%.*s' for binding", BSTR_P(ptex.name));
-        TARRAY_APPEND(p->tactx, p->pass_textures, p->num_pass_textures, ptex);
+        save_pass_tex(p, ptex);
     }
 
-    int total_count = 0;
-    const struct hook_pass *pass = NULL;
-
-    // This loop serves two purposes: figuring out the next pass to execute
-    // *and* counting the total number of passes, so we can determine if we
-    // need to return PL_HOOK_STATUS_AGAIN or not.
-    for (int i = 0; i < p->num_hook_passes; i++) {
-        if (p->hook_passes[i].exec_stages & params->stage) {
-            if (total_count++ < params->count)
-                continue;
-
-            // Set this as the next pass to execute
-            if (!pass)
-                pass = &p->hook_passes[i];
-        }
-    }
-
-    // No more passes, hooray!
-    if (!pass)
-        return 0;
-
-    const struct custom_shader_hook *hook = &pass->hook;
-    struct pl_shader *sh = params->sh;
-    int ret = 0;
-
-    PL_TRACE(p, "Executing hook pass %d/%d on stage '%.*s': %.*s",
-             params->count, total_count, BSTR_P(stage), BSTR_P(hook->pass_desc));
-
+    struct pl_shader *sh = NULL;
     struct szexp_ctx scope = {
         .priv = p,
         .params = params,
     };
 
-    // Test for execution condition
-    float run = 0;
-    if (!pl_eval_szexpr(p->ctx, &scope, lookup_tex, hook->cond, &run))
-        return -1;
+    for (int n = 0; n < p->num_hook_passes; n++) {
+        const struct hook_pass *pass = &p->hook_passes[n];
+        if (!(pass->exec_stages & params->stage))
+            continue;
 
-    if (!run) {
-        PL_TRACE(p, "Skipping hook due to condition");
-        goto done;
-    }
+        const struct custom_shader_hook *hook = &pass->hook;
+        PL_TRACE(p, "Executing hook pass %d on stage '%.*s': %.*s",
+                 n, BSTR_P(stage), BSTR_P(hook->pass_desc));
 
-    if (hook->is_compute) {
-        if (!sh_try_compute(sh, hook->block_w, hook->block_h, false, 0)) {
-            PL_ERR(p, "Failed dispatching COMPUTE shader");
-            return -1;
-        }
-    }
+        // Test for execution condition
+        float run = 0;
+        if (!pl_eval_szexpr(p->ctx, &scope, lookup_tex, hook->cond, &run))
+            goto error;
 
-    float out_size[2] = {0};
-    if (!pl_eval_szexpr(p->ctx, &scope, lookup_tex, hook->width,  &out_size[0]) ||
-        !pl_eval_szexpr(p->ctx, &scope, lookup_tex, hook->height, &out_size[1]))
-    {
-        return -1;
-    }
-
-    if (!sh_require(sh, PL_SHADER_SIG_NONE, out_size[0], out_size[1])) {
-        PL_ERR(p, "Incompatible shader size requirements? Perhaps you tried "
-               "resizing a non-resizable pass");
-        return -1;
-    }
-
-    for (int i = 0; i < PL_ARRAY_SIZE(hook->bind_tex); i++) {
-        struct bstr texname = hook->bind_tex[i];
-        if (!texname.start)
-            break;
-
-        if (bstr_equals0(texname, "HOOKED")) {
-            if (!bind_hook_tex(sh, stage, &params->tex))
-                return -1;
-            GLSLH("#define HOOKED_raw %.*s_raw \n", BSTR_P(stage));
-            GLSLH("#define HOOKED_pos %.*s_pos \n", BSTR_P(stage));
-            GLSLH("#define HOOKED_size %.*s_size \n", BSTR_P(stage));
-            GLSLH("#define HOOKED_rot %.*s_rot \n", BSTR_P(stage));
-            GLSLH("#define HOOKED_off %.*s_off \n", BSTR_P(stage));
-            GLSLH("#define HOOKED_pt %.*s_pt \n", BSTR_P(stage));
-            GLSLH("#define HOOKED_map %.*s_map \n", BSTR_P(stage));
-            GLSLH("#define HOOKED_mul %.*s_mul \n", BSTR_P(stage));
-            GLSLH("#define HOOKED_tex %.*s_tex \n", BSTR_P(stage));
-            GLSLH("#define HOOKED_texOff %.*s_texOff \n", BSTR_P(stage));
-            goto next_bind;
+        if (!run) {
+            PL_TRACE(p, "Skipping hook due to condition");
+            continue;
         }
 
-        for (int j = 0; j < p->num_lut_textures; j++) {
-            if (bstr_equals(texname, p->lut_textures[i].name)) {
-                // Directly bind this, no need to bother with all the
-                // `bind_hook_tex` boilerplate
-                ident_t id = sh_desc(sh, (struct pl_shader_desc) {
-                    .desc = {
-                        .name = "hook_lut",
-                        .type = PL_DESC_SAMPLED_TEX,
-                    },
-                    .object = p->lut_textures[i].tex,
-                });
-                GLSLH("#define %.*s %s \n", BSTR_P(texname), id);
-                goto next_bind;
+        float out_size[2] = {0};
+        if (!pl_eval_szexpr(p->ctx, &scope, lookup_tex, hook->width,  &out_size[0]) ||
+            !pl_eval_szexpr(p->ctx, &scope, lookup_tex, hook->height, &out_size[1]))
+        {
+            goto error;
+        }
+
+        // Generate a new texture to store the render result
+        const struct pl_tex *fbo;
+        fbo = params->get_tex(params->priv, out_size[0], out_size[1]);
+        if (!fbo) {
+            PL_ERR(p, "Failed dispatching hook: `get_tex` callback failed?");
+            goto error;
+        }
+
+        // Generate a new shader object
+        sh = pl_dispatch_begin(params->dispatch);
+        if (!sh_require(sh, PL_SHADER_SIG_NONE, out_size[0], out_size[1]))
+            goto error;
+
+        if (hook->is_compute) {
+            if (!sh_try_compute(sh, hook->block_w, hook->block_h, false, 0) ||
+                !fbo->params.storable)
+            {
+                PL_ERR(p, "Failed dispatching COMPUTE shader");
+                goto error;
             }
         }
 
-        for (int j = 0; j < p->num_pass_textures; j++) {
-            if (bstr_equals(texname, p->pass_textures[i].name)) {
-                if (!bind_hook_tex(sh, texname, &p->pass_textures[i].tex))
-                    return -1;
-                goto next_bind;
+        // Bind all necessary input textures
+        for (int i = 0; i < PL_ARRAY_SIZE(hook->bind_tex); i++) {
+            struct bstr texname = hook->bind_tex[i];
+            if (!texname.start)
+                break;
+
+            if (bstr_equals0(texname, "HOOKED")) {
+                GLSLH("#define HOOKED_raw %.*s_raw \n", BSTR_P(stage));
+                GLSLH("#define HOOKED_pos %.*s_pos \n", BSTR_P(stage));
+                GLSLH("#define HOOKED_size %.*s_size \n", BSTR_P(stage));
+                GLSLH("#define HOOKED_rot %.*s_rot \n", BSTR_P(stage));
+                GLSLH("#define HOOKED_off %.*s_off \n", BSTR_P(stage));
+                GLSLH("#define HOOKED_pt %.*s_pt \n", BSTR_P(stage));
+                GLSLH("#define HOOKED_map %.*s_map \n", BSTR_P(stage));
+                GLSLH("#define HOOKED_mul %.*s_mul \n", BSTR_P(stage));
+                GLSLH("#define HOOKED_tex %.*s_tex \n", BSTR_P(stage));
+                GLSLH("#define HOOKED_texOff %.*s_texOff \n", BSTR_P(stage));
+
+                // Continue with binding this, under the new name
+                texname = stage;
             }
+
+            for (int j = 0; j < p->num_lut_textures; j++) {
+                if (bstr_equals(texname, p->lut_textures[i].name)) {
+                    // Directly bind this, no need to bother with all the
+                    // `bind_pass_tex` boilerplate
+                    ident_t id = sh_desc(sh, (struct pl_shader_desc) {
+                        .desc = {
+                            .name = "hook_lut",
+                            .type = PL_DESC_SAMPLED_TEX,
+                        },
+                        .object = p->lut_textures[i].tex,
+                    });
+                    GLSLH("#define %.*s %s \n", BSTR_P(texname), id);
+                    goto next_bind;
+                }
+            }
+
+            for (int j = 0; j < p->num_pass_textures; j++) {
+                if (bstr_equals(texname, p->pass_textures[i].name)) {
+                    if (!bind_pass_tex(sh, texname, &p->pass_textures[i]))
+                        goto error;
+                    goto next_bind;
+                }
+            }
+
+            // If none of the above matched, this is a bogus/unknown texture name
+            PL_ERR(p, "Tried binding unknown texture '%.*s'!", BSTR_P(texname));
+            goto error;
+
+    next_bind: ; // outer 'continue'
         }
 
-        // If none of the above matched, this is a bogus/unknown texture name
-        PL_ERR(p, "Tried binding unknown texture '%.*s'!", BSTR_P(texname));
-        return -1;
+        // Set up the input variables
+        p->frame_count++;
+        GLSLH("#define frame %s \n", sh_var(sh, (struct pl_shader_var) {
+            .var = pl_var_int("frame"),
+            .data = &p->frame_count,
+            .dynamic = true,
+        }));
 
-next_bind: ; // outer 'continue'
-    }
+        double random = prng_step(p->prng_state);
+        GLSLH("#define random %s \n", sh_var(sh, (struct pl_shader_var) {
+            .var = pl_var_float("random"),
+            .data = &random,
+            .dynamic = true,
+        }));
 
-    // Set up the input variables
-    p->frame_count++;
-    GLSLH("#define frame %s \n", sh_var(sh, (struct pl_shader_var) {
-        .var = pl_var_int("frame"),
-        .data = &p->frame_count,
-        .dynamic = true,
-    }));
+        double src_size[2] = { pl_rect_w(params->src_rect), pl_rect_h(params->src_rect) };
+        GLSLH("#define input_size %s \n", sh_var(sh, (struct pl_shader_var) {
+            .var = pl_var_vec2("input_size"),
+            .data = src_size,
+        }));
 
-    double random = prng_step(p->prng_state);
-    GLSLH("#define random %s \n", sh_var(sh, (struct pl_shader_var) {
-        .var = pl_var_float("random"),
-        .data = &random,
-        .dynamic = true,
-    }));
+        double dst_size[2] = { pl_rect_w(params->dst_rect), pl_rect_h(params->dst_rect) };
+        GLSLH("#define target_size %s \n", sh_var(sh, (struct pl_shader_var) {
+            .var = pl_var_vec2("target_size"),
+            .data = dst_size,
+        }));
 
-    double src_size[2] = { pl_rect_w(params->src_rect), pl_rect_h(params->src_rect) };
-    GLSLH("#define input_size %s \n", sh_var(sh, (struct pl_shader_var) {
-        .var = pl_var_vec2("input_size"),
-        .data = src_size,
-    }));
+        double tex_off[2] = { params->rect.x0, params->rect.y0 };
+        GLSLH("#define tex_offset %s \n", sh_var(sh, (struct pl_shader_var) {
+            .var = pl_var_vec2("tex_offset"),
+            .data = tex_off,
+        }));
 
-    double dst_size[2] = { pl_rect_w(params->dst_rect), pl_rect_h(params->dst_rect) };
-    GLSLH("#define target_size %s \n", sh_var(sh, (struct pl_shader_var) {
-        .var = pl_var_vec2("target_size"),
-        .data = dst_size,
-    }));
+        // Load and run the user shader itself
+        pl_shader_append_bstr(sh, SH_BUF_HEADER, hook->pass_body);
 
-    double tex_off[2] = { params->rect->x0, params->rect->y0 };
-    GLSLH("#define tex_offset %s \n", sh_var(sh, (struct pl_shader_var) {
-        .var = pl_var_vec2("tex_offset"),
-        .data = tex_off,
-    }));
+        if (hook->is_compute) {
+            GLSLH("#define out_image %s \n", sh_desc(sh, (struct pl_shader_desc) {
+                .desc = {
+                    .name = "out_image",
+                    .type = PL_DESC_STORAGE_IMG,
+                    .access = PL_DESC_ACCESS_WRITEONLY,
+                },
+                .object = fbo,
+            }));
 
-    // Load the user shader itself
-    pl_shader_append_bstr(sh, SH_BUF_HEADER, hook->pass_body);
+            sh->res.output = PL_SHADER_SIG_NONE;
+            int dispatch_size[3] = {
+                // TODO: calculate dispatch size based on `block_w` / `thread_w`
+            };
 
-    if (hook->is_compute) {
-        GLSL("hook(); \n");
-    } else {
-        GLSL("vec4 color = hook(); \n");
-    }
+            GLSL("hook(); \n");
+            if (!pl_dispatch_compute(params->dispatch, &sh, dispatch_size))
+                goto error;
+        } else {
+            GLSL("vec4 color = hook(); \n");
+            if (!pl_dispatch_finish(params->dispatch, &sh, fbo, NULL, NULL))
+                goto error;
+        }
 
-    // Update the rendering rect based on the given `offset`
-    float sx = out_size[0] / pl_rect_w(*params->rect),
-          sy = out_size[1] / pl_rect_h(*params->rect),
-          x0 = sx * params->rect->x0 + hook->offset[0],
-          y0 = sy * params->rect->y0 + hook->offset[1];
+        // Update the rendering rect based on the given transform / offset
+        float sx = out_size[0] / pl_rect_w(params->rect),
+              sy = out_size[1] / pl_rect_h(params->rect),
+              x0 = sx * params->rect.x0 + hook->offset[0],
+              y0 = sy * params->rect.y0 + hook->offset[1];
 
-    *params->rect = (struct pl_rect2df) {
-        x0,
-        y0,
-        x0 + out_size[0],
-        y0 + out_size[1],
-    };
+        struct pl_rect2df new_rect = {
+            x0,
+            y0,
+            x0 + out_size[0],
+            y0 + out_size[1],
+        };
 
-    // TODO: also save if we re-use this implicitly overwritten texture later
-    if (hook->save_tex.start)
-        ret |= PL_HOOK_STATUS_SAVE;
+        // Save the result of this shader invocation
+        struct pass_tex ptex = {
+            .name = hook->save_tex.start ? hook->save_tex : stage,
+            .tex = fbo,
+            .repr = params->repr,
+            .color = params->color,
+            .comps  = PL_DEF(hook->comps, params->components),
+            .rect = new_rect,
+        };
 
-done:
-    if (params->count + 1 < total_count)
-        ret |= PL_HOOK_STATUS_AGAIN;
+        PL_TRACE(p, "Saving output texture '%.*s' from hook execution on '%.*s'",
+                 BSTR_P(ptex.name), BSTR_P(stage));
 
-    return ret;
-}
+        save_pass_tex(p, ptex);
 
-static void hook_save(void *priv, const struct pl_save_params *params)
-{
-    struct hook_priv *p = priv;
-
-    // Figure out which hook pass triggered this save invocation, using the
-    // same logic as `hook_hook`.
-    int total_count = 0;
-    const struct hook_pass *pass = NULL;
-
-    for (int i = 0; i < p->num_hook_passes; i++) {
-        if (p->hook_passes[i].exec_stages & params->stage) {
-            if (total_count++ < params->count)
-                continue;
-
-            pass = &p->hook_passes[i];
-            break;
+        // Update the result object, unless we saved to a different name
+        if (!hook->save_tex.start) {
+            res = (struct pl_hook_res) {
+                .output = PL_SHADER_SIG_NONE,
+                .tex = fbo,
+                .repr = params->repr,
+                .color = params->color,
+                .components = PL_DEF(hook->comps, params->components),
+                .rect = new_rect,
+            };
         }
     }
 
-    pl_assert(pass);
-    pl_assert(pass->hook.save_tex.start);
+    return res;
 
-    struct pass_tex ptex = {
-        .name = pass->hook.save_tex,
-        .tex = params->tex,
-    };
-
-    PL_TRACE(p, "Saving output texture '%.*s' from hook execution on '%.*s'",
-             BSTR_P(ptex.name), BSTR_P(pl_stage_to_mp(params->stage)));
-
-    TARRAY_APPEND(p->tactx, p->pass_textures, p->num_pass_textures, ptex);
+error:
+    return (struct pl_hook_res) { .failed = true };
 }
 
 static bool register_hook(void *priv, struct custom_shader_hook hook)
@@ -1036,7 +1070,6 @@ const struct pl_hook *pl_mpv_user_shader_parse(const struct pl_gpu *gpu,
         .priv = p,
         .reset = hook_reset,
         .hook = hook_hook,
-        .save = hook_save,
     };
 
     *p = (struct hook_priv) {

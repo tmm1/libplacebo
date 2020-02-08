@@ -542,6 +542,9 @@ static void pass_opt_hook_point(struct pl_renderer *rr, struct pass_state *pass,
     const struct pl_tex *cur_tex = NULL;
     struct img *cur_img = &pass->cur_img;
 
+    // TODO: rewrite this for the new style of dispatch
+
+    /*
     for (int i = 0; i < params->num_hooks; i++) {
         const struct pl_hook *hook = params->hooks[i];
         if (!(hook->stages & stage))
@@ -660,6 +663,7 @@ repeat_hook:
             .tex = cur_tex,
         });
     }
+    */
 
     return;
 

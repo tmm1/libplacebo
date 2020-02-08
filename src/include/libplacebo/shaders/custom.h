@@ -66,47 +66,43 @@ static inline bool pl_hook_stage_resizable(enum pl_hook_stage stage) {
     }
 }
 
-// Return flags for the `hook` function, indicating what the caller should do.
-enum pl_hook_flags {
-    PL_HOOK_STATUS_AGAIN     = 1 << 0,  // If set, the same hook is run again
-    PL_HOOK_STATUS_SAVE      = 1 << 1,  // If set, run the `save` function
-    PL_HOOK_STATUS_OVERWRITE = 1 << 2,  // If set, the shader output "replaces"
-                                        // the hooked image
-};
-
-// Struct encapsulating a texture + metadata on how to use it
-struct pl_hook_tex {
-    // The actual texture object itself. This is owned by the renderer, and
-    // users may expect its contents to remain untouched for the duration
-    // of a frame, but not between frames.
-    const struct pl_tex *tex;
-
-    // The effective src rect of this specific texture.
-    struct pl_rect2df src_rect;
-
-    // The effective representation of the color in this texture.
-    struct pl_color_repr repr;
-};
-
 struct pl_hook_params {
+    // GPU objects associated with the `pl_renderer`, which the user may
+    // use for their own purposes.
     const struct pl_gpu *gpu;
-    enum pl_hook_stage stage;   // Which stage triggered the hook
-    int count;                  // Increments per invocation of this hook
+    struct pl_dispatch *dispatch;
 
-    // The shader object, which the user may modify. The shader is guaranteed
-    // to have the current signature requested by the user in `pl_hook.input`.
+    // Helper function to fetch a new temporary texture, using renderer-backed
+    // storage. This is guaranteed to have sane image usage requirements and a
+    // 16-bit or floating point format. The user does not need to free/destroy
+    // this texture in any way. May return NULL.
+    const struct pl_tex *(*get_tex)(void *priv, int width, int height);
+    void *priv;
+
+    // Which stage triggered the hook to run.
+    enum pl_hook_stage stage;
+
+    // For `PL_SHADER_SIG_COLOR`, this contains the existing shader object with
+    // the color already pre-sampled into `vec4 color`. The user may modify
+    // this as much as they want, as long as they don't run it.
+    //
     // Note that this shader might have specific output size requirements,
-    // depending on the exact shader stage hooked by the user.
+    // depending on the exact shader stage hooked by the user, and may already
+    // be a compute shader.
     struct pl_shader *sh;
 
-    // When the signature is `PL_SHADER_SIG_NONE`, the user may instead sample
-    // from this texture. (Otherwise, this struct is {0})
-    struct pl_hook_tex tex;
+    // For  PL_SHADER_SIG_NONE`, this contains the texture that the user should
+    // sample from.
+    //
+    // Note: This texture object is owned by the renderer, and users must not
+    // modify its contents. It will not be touched for the duration of a frame,
+    // but the contents are lost in between frames.
+    const struct pl_tex *tex;
 
     // The effective current rectangle of the image we're rendering in this
-    // shader, which may be modified by the hook (except for non-resizable
-    // stages)
-    struct pl_rect2df *rect;
+    // shader, i.e. the effective rect of the content we're interested in,
+    // as a crop of either `sh` or `tex` (depending on the signature).
+    struct pl_rect2df rect;
 
     // The current effective colorspace and representation, of either the
     // pre-sampled color (in `sh`), or the contents of `tex`, respectively.
@@ -114,20 +110,46 @@ struct pl_hook_params {
     struct pl_color_space color;
     int components;
 
-    // The (cropped) source and destination rectangles of the overall rendering.
+    // The (cropped) source and destination rectangles of the overall rendering
+    // as specified by the user, in the absence of modification by any hooks.
     struct pl_rect2df src_rect;
     struct pl_rect2d dst_rect;
 };
 
-struct pl_save_params {
-    // Same as the corresponding `pl_hook_params`
-    const struct pl_gpu *gpu;
-    enum pl_hook_stage stage;
-    int count;
+struct pl_hook_res {
+    // If true, the hook is assumed to have "failed" or errored in some way,
+    // and all other fields are ignored.
+    bool failed;
 
-    // The output of the `hook` function's shader, after execution. The same
-    // lifetime rules apply as for `pl_hook_params.tex`.
-    struct pl_hook_tex tex;
+    // What type of output this shader stage is returning.
+    enum pl_shader_sig output;
+
+    // For `PL_SHADER_SIG_COLOR`, this *must* be set to a valid `pl_shader`
+    // object containing the sampled color value, and *should* be allocated
+    // from the given `pl_dispatch` object. Ignored otherwise.
+    struct pl_shader *sh;
+
+    // For `PL_SHADER_SIG_NONE`, this *may* contain the texture object
+    // containing the result of rendering the hook. This *should* be a texture
+    // allocated using the given `get_tex` callback, to ensure the format and
+    // texture usage flags are compatible with what the renderer expects.
+    const struct pl_tex *tex;
+
+    // Note: It's possible for a shader to return neither `sh` or `tex`, in
+    // which case it's assumed that the shader has simply not decided to
+    // modify or replace the input texture in any way (such as a hook that
+    // only exists to render or save the input for internal usage).
+
+    // For shaders the somehow modify the input, this returns the new/altered
+    // versions of the existing "current texture" metadata.
+    struct pl_color_repr repr;
+    struct pl_color_space color;
+    int components;
+
+    // This contains the new effective rect of the contents. This may be
+    // different from the original `rect` for resizable passes. Ignored for
+    // non-resizable passes.
+    struct pl_rect2df rect;
 };
 
 struct pl_hook {
@@ -135,23 +157,12 @@ struct pl_hook {
     enum pl_shader_sig input;   // Which input signature this hook expects
     void *priv;                 // Arbitrary user context
 
-    // Note: The only allowed output signature is `PL_SHADER_SIG_COLOR`, which
-    // is why there's no `output` analog of `input`.
-
     // Called at the beginning of passes, to reset/initialize the hook. (Optional)
     void (*reset)(void *priv);
 
     // The hook function itself. Called by the renderer at any of the indicated
-    // hook stages. The return value of this function is interpreted as
-    // a combination of `pl_hook_flags` indicating what the caller is supposed
-    // to do next. If the caller instead returns any negative number, the
-    // hook is assumed to have errored/failed in some way.
-    int (*hook)(void *priv, const struct pl_hook_params *params);
-
-    // If the previous `hook` invocation returned `PL_HOOK_STATUS_SAVE`, then
-    // this function will be called on the texture representing the result
-    // of executing that hook invocation's shader.
-    void (*save)(void *priv, const struct pl_save_params *params);
+    // hook stages. See `pl_hook_res` for more info on the return values.
+    struct pl_hook_res (*hook)(void *priv, const struct pl_hook_params *params);
 };
 
 // Compatibility layer with `mpv` user shaders. See the mpv man page for more
