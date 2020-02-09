@@ -32,22 +32,13 @@ enum {
     SCALER_COUNT,
 };
 
-// Canonical plane order aliases
+// Plane 'type', ordered by incrementing 'priority'
 enum {
-    PLANE_R = 0,
-    PLANE_G = 1,
-    PLANE_B = 2,
-    PLANE_A = 3,
-    PLANE_COUNT,
-
-    // aliases for other systems
-    PLANE_Y    = PLANE_R,
-    PLANE_CB   = PLANE_G,
-    PLANE_CR   = PLANE_B,
-
-    PLANE_CIEX = PLANE_R,
-    PLANE_CIEY = PLANE_G,
-    PLANE_CIEZ = PLANE_B,
+    PLANE_ALPHA,
+    PLANE_CHROMA,
+    PLANE_LUMA,
+    PLANE_RGB,
+    PLANE_XYZ,
 };
 
 struct sampler {
@@ -82,7 +73,7 @@ struct pl_renderer {
     struct pl_shader_obj *dither_state;
     struct pl_shader_obj *lut3d_state;
     const struct pl_tex *main_scale_fbo;
-    const struct pl_tex *deband_fbos[PLANE_COUNT];
+    const struct pl_tex *deband_fbos[4];
     const struct pl_tex *output_fbo;
     const struct pl_tex **hook_fbos;
     int num_hook_fbos;
@@ -565,15 +556,17 @@ static const struct pl_tex *get_hook_tex(void *priv, int width, int height)
     return rr->hook_fbos[idx];
 }
 
-static void pass_opt_hook_point(struct pl_renderer *rr, struct pass_state *pass,
-                                enum pl_hook_stage stage,
-                                const struct pl_render_params *params)
+// if `ptex` is unspecified, uses `cur_img.sh` instead
+static void pass_hook(struct pl_renderer *rr, struct pass_state *pass,
+                      enum pl_hook_stage stage, const struct pl_tex **ptex,
+                      const struct pl_render_params *params)
 {
     if (!rr->fbofmt || rr->disable_hooks)
         return;
 
-    const struct pl_tex *cur_tex = NULL;
+    const struct pl_tex *cur_tex = ptex ? *ptex : NULL;
     struct img *cur_img = &pass->cur_img;
+    pl_assert(!!cur_tex ^ !!cur_img->sh);
 
     for (int n = 0; n < params->num_hooks; n++) {
         const struct pl_hook *hook = params->hooks[n];
@@ -638,11 +631,22 @@ static void pass_opt_hook_point(struct pl_renderer *rr, struct pass_state *pass,
             goto error;
         }
 
+        bool resizable = pl_hook_stage_resizable(stage);
         switch (res.output) {
         case PL_HOOK_SIG_NONE:
             break;
 
         case PL_HOOK_SIG_TEX:
+            if (!resizable) {
+                if (res.tex->params.w != cur_img->w ||
+                    res.tex->params.h != cur_img->h ||
+                    !pl_rect2d_eq(res.rect, cur_img->rect))
+                {
+                    PL_ERR(rr, "User hook tried resizing non-resizable stage!");
+                    goto error;
+                }
+            }
+
             cur_tex = res.tex;
             *cur_img = (struct img) {
                 .repr = res.repr,
@@ -655,6 +659,16 @@ static void pass_opt_hook_point(struct pl_renderer *rr, struct pass_state *pass,
             break;
 
         case PL_HOOK_SIG_COLOR:
+            if (!resizable) {
+                if (res.sh->output_w != cur_img->w ||
+                    res.sh->output_h != cur_img->h ||
+                    !pl_rect2d_eq(res.rect, cur_img->rect))
+                {
+                    PL_ERR(rr, "User hook tried resizing non-resizable stage!");
+                    goto error;
+                }
+            }
+
             cur_tex = NULL;
             *cur_img = (struct img) {
                 .sh = res.sh,
@@ -671,12 +685,29 @@ static void pass_opt_hook_point(struct pl_renderer *rr, struct pass_state *pass,
         }
     }
 
-    if (cur_tex) {
+    if (ptex) {
+        if (!cur_tex) {
+            int idx = pass->hook_index++;
+            if (idx == rr->num_hook_fbos)
+                TARRAY_APPEND(rr, rr->hook_fbos, rr->num_hook_fbos, NULL);
+
+            cur_tex = finalize_img(rr, cur_img, rr->fbofmt, &rr->hook_fbos[idx]);
+            if (!cur_tex) {
+                PL_ERR(rr, "Failed dispatching shader prior to hook!");
+                goto error;
+            }
+        }
+
         pl_assert(!cur_img->sh);
-        cur_img->sh = pl_dispatch_begin(rr->dp);
-        pl_shader_sample_direct(cur_img->sh, &(struct pl_sample_src) {
-            .tex = cur_tex,
-        });
+        *ptex = cur_tex;
+    } else {
+        if (cur_tex) {
+            pl_assert(!cur_img->sh);
+            cur_img->sh = pl_dispatch_begin(rr->dp);
+            pl_shader_sample_direct(cur_img->sh, &(struct pl_sample_src) {
+                .tex = cur_tex,
+            });
+        }
     }
 
     return;
@@ -834,63 +865,127 @@ static bool pass_read_image(struct pl_renderer *rr, struct pass_state *pass,
     // This should ideally be the plane that most closely matches the target
     // image size
     struct pl_plane planes[4];
-    const struct pl_plane *refplane = NULL; // points to one of `planes`
-    int best_diff = 0, best_off = 0;
+    struct pl_color_repr plane_repr[4];
+    struct pl_rect2df plane_rc[4];
+    int refidx = -1; // index into `planes`
+    int best_diff = 0;
+    float best_off = 0;
 
-    pl_assert(image->num_planes < PLANE_COUNT);
+    pl_assert(image->num_planes <= 4);
     for (int i = 0; i < image->num_planes; i++) {
         struct pl_plane *plane = &planes[i];
         *plane = image->planes[i];
+        plane_repr[i] = image->repr;
+        plane_rc[i] = (struct pl_rect2df) {
+            -plane->shift_x,
+            -plane->shift_y,
+            plane->texture->params.w - plane->shift_x,
+            plane->texture->params.h - plane->shift_y,
+        };
 
-        // TODO: Dispatch user shaders on all source planes
+        int plane_type = -1;
+        if (pl_color_system_is_ycbcr_like(plane_repr[i].sys)) {
+            for (int c = 0; c < plane->components; c++) {
+                switch (plane->component_mapping[c]) {
+                case PL_CHANNEL_Y:
+                    plane_type = PL_MAX(plane_type, PLANE_LUMA);
+                    continue;
 
-        const struct pl_tex *tex = plane->texture;
-        int diff = PL_MAX(abs(tex->params.w - image->width),
-                          abs(tex->params.h - image->height));
-        int off = PL_MAX(plane->shift_x, plane->shift_y);
+                case PL_CHANNEL_CB:
+                case PL_CHANNEL_CR:
+                    plane_type = PL_MAX(plane_type, PLANE_CHROMA);
+                    continue;
 
-        if (!refplane || diff < best_diff || (diff == best_diff && off < best_off)) {
-            refplane = plane;
+                case PL_CHANNEL_A:
+                    plane_type = PL_MAX(plane_type, PLANE_ALPHA);
+                    continue;
+
+                default: continue;
+                }
+            }
+        } else {
+            switch (plane_repr[i].sys) {
+            case PL_COLOR_SYSTEM_UNKNOWN: // fall through to RGB
+            case PL_COLOR_SYSTEM_RGB: plane_type = PLANE_RGB; break;
+            case PL_COLOR_SYSTEM_XYZ: plane_type = PLANE_XYZ; break;
+            default: abort();
+            }
+        }
+
+        pl_assert(plane_type >= 0);
+        static const enum pl_hook_stage plane_stages[] = {
+            [PLANE_LUMA]   = PL_HOOK_LUMA_INPUT,
+            [PLANE_CHROMA] = PL_HOOK_CHROMA_INPUT,
+            [PLANE_ALPHA]  = PL_HOOK_ALPHA_INPUT,
+            [PLANE_RGB]    = PL_HOOK_RGB_INPUT,
+            [PLANE_XYZ]    = PL_HOOK_XYZ_INPUT,
+        };
+
+        // Hack: `pass_hook` is designed around `pass->cur_img`, so fake it
+        pass->cur_img = (struct img) {
+            .w = plane->texture->params.w,
+            .h = plane->texture->params.h,
+            .rect = plane_rc[i],
+            .repr = plane_repr[i],
+            .color = image->color,
+            .comps = plane->components,
+        };
+
+        pass_hook(rr, pass, plane_stages[plane_type], &plane->texture, params);
+        plane_repr[i] = pass->cur_img.repr;
+        plane_rc[i] = pass->cur_img.rect;
+
+        int diff = PL_MAX(abs(plane->texture->params.w - image->width),
+                          abs(plane->texture->params.h - image->height));
+        float off = PL_MAX(fabs(plane_rc[i].x0), fabs(plane_rc[i].y0));
+
+        if (refidx < 0 || diff < best_diff || (diff == best_diff && off < best_off)) {
+            refidx = i;
             best_diff = diff;
             best_off = off;
         }
+
     }
 
-    if (!refplane) {
+    if (refidx < 0) {
         PL_ERR(rr, "Image contains no planes?");
         return false;
     }
 
-    float ref_w = refplane->texture->params.w,
-          ref_h = refplane->texture->params.h;
+    float ref_w  = pl_rect_w(plane_rc[refidx]),
+          ref_h  = pl_rect_h(plane_rc[refidx]),
+          ref_sx = PL_MAX(1.0, ref_w / image->width),
+          ref_sy = PL_MAX(1.0, ref_h / image->height);
 
-    // Round the src_rect up to the nearest integer size
-    struct pl_rect2d rc = {
-        floorf(image->src_rect.x0),
-        floorf(image->src_rect.y0),
-        ceilf(image->src_rect.x1),
-        ceilf(image->src_rect.y1),
+    // Scale the source rect by the scale of the reference plane
+    struct pl_rect2df rc = {
+        ref_sx * image->src_rect.x0,
+        ref_sy * image->src_rect.y0,
+        ref_sx * image->src_rect.x1,
+        ref_sy * image->src_rect.y1,
     };
 
-    int target_w = pl_rect_w(rc),
-        target_h = pl_rect_h(rc);
+    // Round this up to the nearest integer size
+    struct pl_rect2d rc_round = {
+        floorf(rc.x0), floorf(rc.y0), ceilf(rc.x1), ceilf(rc.y1),
+    };
+
+    int target_w = pl_rect_w(rc_round),
+        target_h = pl_rect_h(rc_round);
     pl_assert(target_w > 0 && target_h > 0);
 
     bool has_alpha = false;
-    struct pl_color_repr repr = image->repr;
-    float scale = pl_color_repr_normalize(&repr);
-
     for (int i = 0; i < image->num_planes; i++) {
         struct pl_shader *psh = pl_dispatch_begin_ex(rr->dp, true);
         struct pl_plane *plane = &planes[i];
 
         // Compute the source shift/scale relative to the reference size
-        float pw = plane->texture->params.w,
-              ph = plane->texture->params.h,
+        float pw = pl_rect_w(plane_rc[i]),
+              ph = pl_rect_h(plane_rc[i]),
               rx = ref_w / pw,
               ry = ref_h / ph,
-              sx = plane->shift_x - refplane->shift_x,
-              sy = plane->shift_y - refplane->shift_y;
+              ox = plane_rc[i].x0 - plane_rc[refidx].x0,
+              oy = plane_rc[i].y0 - plane_rc[refidx].y0;
 
         // Only accept integer scaling ratios. This accounts for the fact
         // that fractionally subsampled planes get rounded up to the nearest
@@ -901,14 +996,14 @@ static bool pass_read_image(struct pl_renderer *rr, struct pass_state *pass,
         struct pl_sample_src src = {
             .tex        = plane->texture,
             .components = plane->components,
-            .scale      = scale,
+            .scale      = pl_color_repr_normalize(&plane_repr[i]),
             .new_w      = target_w,
             .new_h      = target_h,
             .rect       = {
-                rc.x0 / rrx - sx / rx,
-                rc.y0 / rry - sy / ry,
-                rc.x1 / rrx - sx / rx,
-                rc.y1 / rry - sy / ry,
+                rc_round.x0 / rrx + ox / rx,
+                rc_round.y0 / rry + oy / ry,
+                rc_round.x1 / rrx + ox / rx,
+                rc_round.y1 / rry + oy / ry,
             },
         };
 
@@ -935,38 +1030,30 @@ static bool pass_read_image(struct pl_renderer *rr, struct pass_state *pass,
             GLSL("color[%d] = tmp[%d];\n", plane->component_mapping[c],
                  src.tex->params.format->sample_order[c]);
 
-            has_alpha |= plane->component_mapping[c] == PLANE_A;
+            has_alpha |= plane->component_mapping[c] == PL_CHANNEL_A;
         }
 
         // we don't need it anymore
         pl_dispatch_abort(rr->dp, &psh);
     }
 
-    float basex = image->src_rect.x0 - rc.x0 - refplane->shift_x,
-          basey = image->src_rect.y0 - rc.y0 - refplane->shift_y;
-
     pass->cur_img = (struct img) {
         .sh     = sh,
         .w      = target_w,
         .h      = target_h,
-        .repr   = repr,
+        .repr   = plane_repr[refidx],
         .color  = image->color,
         .comps  = has_alpha ? 4 : 3,
-        .rect   = {
-            basex,
-            basey,
-            basex + pl_rect_w(image->src_rect),
-            basey + pl_rect_h(image->src_rect),
-        },
+        .rect   = rc,
     };
 
     GLSL("}\n");
 
-    pass_opt_hook_point(rr, pass, PL_HOOK_NATIVE, params);
+    pass_hook(rr, pass, PL_HOOK_NATIVE, NULL, params);
 
     // Convert the image colorspace
     pl_shader_decode_color(sh, &pass->cur_img.repr, params->color_adjustment);
-    pass_opt_hook_point(rr, pass, PL_HOOK_RGB, params);
+    pass_hook(rr, pass, PL_HOOK_RGB, NULL, params);
 
     // HDR peak detection, do this as early as possible
     hdr_update_peak(rr, sh, pass, params);
@@ -1035,15 +1122,15 @@ static bool pass_scale_main(struct pl_renderer *rr, struct pass_state *pass,
     if (use_linear) {
         pl_shader_linearize(img->sh, img->color.transfer);
         img->color.transfer = PL_COLOR_TRC_LINEAR;
-        pass_opt_hook_point(rr, pass, PL_HOOK_LINEAR, params);
+        pass_hook(rr, pass, PL_HOOK_LINEAR, NULL, params);
     }
 
     if (use_sigmoid) {
         pl_shader_sigmoidize(img->sh, params->sigmoid_params);
-        pass_opt_hook_point(rr, pass, PL_HOOK_SIGMOID, params);
+        pass_hook(rr, pass, PL_HOOK_SIGMOID, NULL, params);
     }
 
-    pass_opt_hook_point(rr, pass, PL_HOOK_PRE_OVERLAY, params);
+    pass_hook(rr, pass, PL_HOOK_PRE_OVERLAY, NULL, params);
 
     src.tex = finalize_img(rr, img, rr->fbofmt, &rr->main_scale_fbo);
     if (!src.tex)
@@ -1053,8 +1140,7 @@ static bool pass_scale_main(struct pl_renderer *rr, struct pass_state *pass,
     draw_overlays(rr, src.tex, image->overlays, image->num_overlays,
                   img->color, use_sigmoid, NULL, params);
 
-    // TODO: hook texture directly
-    // pass_opt_hook_point(rr, pass, PL_HOOK_PRE_KERNEL, params);
+    pass_hook(rr, pass, PL_HOOK_PRE_KERNEL, &src.tex, params);
 
     struct pl_shader *sh = pl_dispatch_begin_ex(rr->dp, true);
     dispatch_sampler(rr, sh, &rr->samplers[SCALER_MAIN], params, &src);
@@ -1067,12 +1153,12 @@ static bool pass_scale_main(struct pl_renderer *rr, struct pass_state *pass,
         .comps  = img->comps,
     };
 
-    pass_opt_hook_point(rr, pass, PL_HOOK_POST_KERNEL, params);
+    pass_hook(rr, pass, PL_HOOK_POST_KERNEL, NULL, params);
 
     if (use_sigmoid)
         pl_shader_unsigmoidize(sh, params->sigmoid_params);
 
-    pass_opt_hook_point(rr, pass, PL_HOOK_SCALED, params);
+    pass_hook(rr, pass, PL_HOOK_SCALED, NULL, params);
     return true;
 }
 
@@ -1167,7 +1253,7 @@ fallback:
     }
 
     pl_shader_encode_color(sh, &target->repr);
-    pass_opt_hook_point(rr, pass, PL_HOOK_OUTPUT, params);
+    pass_hook(rr, pass, PL_HOOK_OUTPUT, NULL, params);
     // FIXME: What if this ends up being a compute shader?? Should we do the
     // is_compute unredirection *after* encode_color, or will that fuck up
     // the bit depth?

@@ -1007,6 +1007,9 @@ static struct pl_hook_res hook_hook(void *priv, const struct pl_hook_params *par
             .rect = new_rect,
         };
 
+        // It's assumed that users will correctly normalize the input
+        pl_color_repr_normalize(&ptex.repr);
+
         PL_TRACE(p, "Saving output texture '%.*s' from hook execution on '%.*s'",
                  BSTR_P(ptex.name), BSTR_P(stage));
 
@@ -1017,8 +1020,8 @@ static struct pl_hook_res hook_hook(void *priv, const struct pl_hook_params *par
             res = (struct pl_hook_res) {
                 .output = PL_HOOK_SIG_TEX,
                 .tex = fbo,
-                .repr = params->repr,
-                .color = params->color,
+                .repr = ptex.repr,
+                .color = ptex.color,
                 .components = PL_DEF(hook->comps, params->components),
                 .rect = new_rect,
             };
