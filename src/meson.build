@@ -63,11 +63,11 @@ else
 
   glslang_deps = [
     cxx.find_library('glslang',     required: glslang_req),
-    cxx.find_library('HLSL',        required: glslang_req),
-    cxx.find_library('OGLCompiler', required: glslang_req),
-    cxx.find_library('OSDependent', required: glslang_req),
-    cxx.find_library('SPIRV',       required: glslang_req),
-    cxx.find_library('SPVRemapper', required: glslang_req),
+    #cxx.find_library('HLSL',        required: glslang_req),
+    #cxx.find_library('OGLCompiler', required: glslang_req),
+    #cxx.find_library('OSDependent', required: glslang_req),
+    #cxx.find_library('SPIRV',       required: glslang_req),
+    #cxx.find_library('SPVRemapper', required: glslang_req),
   ]
 
   glslang_opt_deps = [
